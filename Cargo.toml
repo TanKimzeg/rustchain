@@ -1,0 +1,10 @@
+[package]
+name = "rustchain"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.45"
+hex = "0.4.3"
+serde = { version = "1.0.228", features = ["derive"] }
+sha2 = "0.11.0"
