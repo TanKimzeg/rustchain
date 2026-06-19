@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 chrono = "0.4.45"
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 hex = "0.4.3"
+rand = { version = "0.8.0", features = ["std"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["std"] }
 sha2 = "0.11.0"
