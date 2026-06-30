@@ -22,7 +22,7 @@ impl Block {
     /// 创建创世区块
     pub fn genesis() -> Self {
         let timestamp = Utc::now().timestamp() as u64;
-        let transactions = Vec::new();  // 应该为 CoinJoin 地址
+        let transactions = Vec::new(); // 应该为 CoinJoin 地址
         let prev_hash = "0".repeat(64);
         let nonce = 0;
         let mut block = Self {
@@ -39,7 +39,7 @@ impl Block {
     /// 计算区块哈希
     pub fn calculate_hash(&self) -> String {
         let mut hasher = Sha256::new();
-        let tx_json: Vec<String> =  self.transactions.iter().map(|tx| tx.to_string()).collect();
+        let tx_json: Vec<String> = self.transactions.iter().map(|tx| tx.to_string()).collect();
         let input = format!(
             "{}{}{}{}{}",
             self.index,
@@ -81,9 +81,9 @@ impl Block {
 }
 #[derive(Debug, Clone)]
 pub struct Blockchain {
-    pub chain: Vec<Block>,          // 存储所有区块
-    pub difficulty: usize,          // 统一挖矿难度
-    pub balance: HashMap<String, u32>, // 余额
+    pub chain: Vec<Block>,             // 存储所有区块
+    pub difficulty: usize,             // 统一挖矿难度
+    pub balance: HashMap<String, u64>, // 余额
 }
 impl Blockchain {
     /// 初始化区块链：自动创建创世块
@@ -92,7 +92,7 @@ impl Blockchain {
         Blockchain {
             chain: vec![genesis],
             difficulty,
-            balance: HashMap::new()
+            balance: HashMap::new(),
         }
     }
     /// 获取链上最新的区块
@@ -136,12 +136,24 @@ impl Blockchain {
         println!("✅ 链验证通过，未被篡改");
         true
     }
+
+    /// 计算余额
+    pub fn compute_balances(&self) -> HashMap<String, u64> {
+        let mut balances = self.balance.clone();
+        for block in &self.chain {
+            for tx in &block.transactions {
+                *balances.entry(tx.sender.clone()).or_insert(0) -= tx.amount;
+                *balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
+            }
+        }
+        balances
+    }
 }
 #[cfg(test)]
 mod tests {
     use crate::transaction::generate_wallet;
 
-use super::*;
+    use super::*;
 
     #[test]
     fn test_blockchain() {
@@ -162,8 +174,22 @@ use super::*;
 
         // 模拟添加3个包含交易的区块
         my_chain.add_block(vec![Transaction::new(&alice_wallet, &bob_addr, 5)]);
+        let balance = my_chain.compute_balances();
+        assert_eq!(*balance.get(&alice_addr).unwrap(), 95);
+        assert_eq!(*balance.get(&bob_addr).unwrap(), 105);
+        assert_eq!(*balance.get(&charlie_addr).unwrap(), 100);
+
         my_chain.add_block(vec![Transaction::new(&bob_wallet, &charlie_addr, 10)]);
+        let balance = my_chain.compute_balances();
+        assert_eq!(*balance.get(&alice_addr).unwrap(), 95);
+        assert_eq!(*balance.get(&bob_addr).unwrap(), 95);
+        assert_eq!(*balance.get(&charlie_addr).unwrap(), 110);
+
         my_chain.add_block(vec![Transaction::new(&charlie_wallet, &alice_addr, 2)]);
+        let balance = my_chain.compute_balances();
+        assert_eq!(*balance.get(&alice_addr).unwrap(), 97);
+        assert_eq!(*balance.get(&bob_addr).unwrap(), 95);
+        assert_eq!(*balance.get(&charlie_addr).unwrap(), 108);
         // 打印整条链的信息
         println!("\n========== 当前链信息 ==========");
         for block in &my_chain.chain {
