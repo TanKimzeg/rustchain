@@ -2,6 +2,8 @@ use ed25519_dalek::{PUBLIC_KEY_LENGTH, Signature, Signer, SigningKey, Verifier, 
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+use crate::COINBASE_ADDR;
+
 /// 交易结构体
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
@@ -40,6 +42,9 @@ impl Transaction {
 
     /// 验证交易签名是否合法
     pub fn verify(&self) -> bool {
+        if &self.sender == COINBASE_ADDR {
+            return true;
+        }
         // 反序列化签名
         let sig = match hex::decode(self.signature.clone()) {
             Ok(s) => s,

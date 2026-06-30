@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use chrono::Utc;
 
-use crate::transaction::Transaction;
+use crate::{COINBASE_ADDR, REWARD, transaction::Transaction};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Block {
@@ -100,11 +100,19 @@ impl Blockchain {
         self.chain.last().unwrap()
     }
     /// 添加新区块到链上
-    pub fn add_block(&mut self, transactions: Vec<Transaction>) {
+    pub fn add_block(&mut self, transactions: Vec<Transaction>, miner: &str) {
         let prev_hash = self.latest_block().hash.clone();
         let index = self.latest_block().index + 1;
         // 1. 初始化新区块
-        let mut new_block = Block::new(index, transactions, prev_hash);
+        let coinbase = Transaction {
+            sender: COINBASE_ADDR.to_string(),
+            receiver: miner.to_string(),
+            amount: REWARD,
+            signature: String::new(),
+        };
+        let mut all_txs = vec![coinbase];
+        all_txs.extend(transactions);
+        let mut new_block = Block::new(index, all_txs, prev_hash);
         // 2. 挖矿（工作量证明）
         new_block.mine_block(self.difficulty);
         // 3. 把区块加到链上
@@ -142,7 +150,9 @@ impl Blockchain {
         let mut balances = self.balance.clone();
         for block in &self.chain {
             for tx in &block.transactions {
-                *balances.entry(tx.sender.clone()).or_insert(0) -= tx.amount;
+                if tx.sender != COINBASE_ADDR {
+                    *balances.entry(tx.sender.clone()).or_insert(0) -= tx.amount;
+                }
                 *balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
             }
         }
@@ -167,29 +177,33 @@ mod tests {
         let bob_addr = hex::encode(bob_wallet.verifying_key().to_bytes());
         let charlie_wallet = generate_wallet();
         let charlie_addr = hex::encode(charlie_wallet.verifying_key().to_bytes());
-        // Air drop
-        my_chain.balance.insert(alice_addr.clone(), 100);
-        my_chain.balance.insert(bob_addr.clone(), 100);
-        my_chain.balance.insert(charlie_addr.clone(), 100);
 
         // 模拟添加3个包含交易的区块
-        my_chain.add_block(vec![Transaction::new(&alice_wallet, &bob_addr, 5)]);
+        my_chain.add_block(
+            vec![Transaction::new(&alice_wallet, &bob_addr, 15)],
+            &alice_addr,
+        );
         let balance = my_chain.compute_balances();
-        assert_eq!(*balance.get(&alice_addr).unwrap(), 95);
-        assert_eq!(*balance.get(&bob_addr).unwrap(), 105);
-        assert_eq!(*balance.get(&charlie_addr).unwrap(), 100);
+        assert_eq!(*balance.get(&alice_addr).unwrap(), 35);
+        assert_eq!(*balance.get(&bob_addr).unwrap(), 15);
 
-        my_chain.add_block(vec![Transaction::new(&bob_wallet, &charlie_addr, 10)]);
+        my_chain.add_block(
+            vec![Transaction::new(&bob_wallet, &charlie_addr, 10)],
+            &bob_addr,
+        );
         let balance = my_chain.compute_balances();
-        assert_eq!(*balance.get(&alice_addr).unwrap(), 95);
-        assert_eq!(*balance.get(&bob_addr).unwrap(), 95);
-        assert_eq!(*balance.get(&charlie_addr).unwrap(), 110);
+        assert_eq!(*balance.get(&alice_addr).unwrap(), 35);
+        assert_eq!(*balance.get(&bob_addr).unwrap(), 55);
+        assert_eq!(*balance.get(&charlie_addr).unwrap(), 10);
 
-        my_chain.add_block(vec![Transaction::new(&charlie_wallet, &alice_addr, 2)]);
+        my_chain.add_block(
+            vec![Transaction::new(&charlie_wallet, &alice_addr, 2)],
+            &charlie_addr,
+        );
         let balance = my_chain.compute_balances();
-        assert_eq!(*balance.get(&alice_addr).unwrap(), 97);
-        assert_eq!(*balance.get(&bob_addr).unwrap(), 95);
-        assert_eq!(*balance.get(&charlie_addr).unwrap(), 108);
+        assert_eq!(*balance.get(&alice_addr).unwrap(), 37);
+        assert_eq!(*balance.get(&bob_addr).unwrap(), 55);
+        assert_eq!(*balance.get(&charlie_addr).unwrap(), 58);
         // 打印整条链的信息
         println!("\n========== 当前链信息 ==========");
         for block in &my_chain.chain {
