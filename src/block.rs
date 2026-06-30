@@ -164,13 +164,24 @@ impl Blockchain {
     pub fn filter_valid_txs(&self, txs: Vec<Transaction>) -> (Vec<Transaction>, Vec<Transaction>) {
         let mut valid = Vec::new();
         let mut invalid = Vec::new();
-        txs.iter().for_each(|tx| {
-            if !tx.verify() {
-                invalid.push(tx.clone());
+        // 从已上链的区块推导当前余额，然后逐笔模拟本批交易
+        let mut sim_balances = self.compute_balances();
+        for tx in txs {
+            if tx.sender == COINBASE_ADDR {
+                // coinbase: 凭空创造货币，加到接收方余额
+                *sim_balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
+                valid.push(tx);
+            } else if tx.verify()
+                && sim_balances.get(&tx.sender).copied().unwrap_or(0) >= tx.amount
+            {
+                // 普通交易：发送方扣钱，接收方加钱
+                *sim_balances.get_mut(&tx.sender).unwrap() -= tx.amount;
+                *sim_balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
+                valid.push(tx);
             } else {
-                valid.push(tx.clone());
+                invalid.push(tx);
             }
-        });
+        }
         (valid, invalid)
     }
 }
