@@ -112,7 +112,8 @@ impl Blockchain {
         };
         let mut all_txs = vec![coinbase];
         all_txs.extend(transactions);
-        let mut new_block = Block::new(index, all_txs, prev_hash);
+        let (valid_txs, _invalid_txs) = self.filter_valid_txs(all_txs);
+        let mut new_block = Block::new(index, valid_txs, prev_hash);
         // 2. 挖矿（工作量证明）
         new_block.mine_block(self.difficulty);
         // 3. 把区块加到链上
@@ -157,6 +158,20 @@ impl Blockchain {
             }
         }
         balances
+    }
+
+    /// 从交易列表中过滤出合法/非法的交易
+    pub fn filter_valid_txs(&self, txs: Vec<Transaction>) -> (Vec<Transaction>, Vec<Transaction>) {
+        let mut valid = Vec::new();
+        let mut invalid = Vec::new();
+        txs.iter().for_each(|tx| {
+            if !tx.verify() {
+                invalid.push(tx.clone());
+            } else {
+                valid.push(tx.clone());
+            }
+        });
+        (valid, invalid)
     }
 }
 #[cfg(test)]
