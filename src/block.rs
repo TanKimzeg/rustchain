@@ -212,87 +212,148 @@ impl Blockchain {
 }
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::SigningKey;
     use crate::{mempool::MemeryPool, transaction::generate_wallet};
-
     use super::*;
 
+    /// 生成钱包和地址对
+    fn wallet() -> (SigningKey, String) {
+        let w = generate_wallet();
+        let addr = hex::encode(w.verifying_key().to_bytes());
+        (w, addr)
+    }
+
+    /// 建一条 3 个区块的链（Alice→Bob 15, Bob→Charlie 10, Charlie→Alice 2）
+    fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, SigningKey, String, SigningKey, String) {
+        let mut c = Blockchain::new(2);
+        let (alice, alice_addr) = wallet();
+        let (bob, bob_addr) = wallet();
+        let (charlie, charlie_addr) = wallet();
+        c.add_block(vec![Transaction::new(&alice, &bob_addr, 15)], &alice_addr);
+        c.add_block(vec![Transaction::new(&bob, &charlie_addr, 10)], &bob_addr);
+        c.add_block(vec![Transaction::new(&charlie, &alice_addr, 2)], &charlie_addr);
+        (c, alice, alice_addr, bob, bob_addr, charlie, charlie_addr)
+    }
+
+    // ── 基础区块 ──────────────────────────────────
+
     #[test]
-    fn test_blockchain() {
-        // 创建难度为4的区块链（哈希前4位是0，普通电脑几秒就能挖出来）
-        let mut my_chain = Blockchain::new(4);
-        println!("创世块生成完成，哈希: {}\n", my_chain.latest_block().hash);
-        // 模拟账户
-        let alice_wallet = generate_wallet();
-        let alice_addr = hex::encode(alice_wallet.verifying_key().to_bytes());
-        let bob_wallet = generate_wallet();
-        let bob_addr = hex::encode(bob_wallet.verifying_key().to_bytes());
-        let charlie_wallet = generate_wallet();
-        let charlie_addr = hex::encode(charlie_wallet.verifying_key().to_bytes());
+    fn test_genesis() {
+        let c = Blockchain::new(2);
+        assert_eq!(c.chain.len(), 1);
+        assert_eq!(c.chain[0].index, 0);
+        assert_eq!(c.chain[0].prev_hash, "0".repeat(64));
+        assert!(c.chain[0].transactions.is_empty());
+    }
 
-        // 模拟添加3个包含交易的区块
-        my_chain.add_block(
-            vec![Transaction::new(&alice_wallet, &bob_addr, 15)],
-            &alice_addr,
-        );
-        let balance = my_chain.compute_balances();
-        assert_eq!(*balance.get(&alice_addr).unwrap(), 35);
-        assert_eq!(*balance.get(&bob_addr).unwrap(), 15);
+    #[test]
+    fn test_add_block_updates_balance() {
+        let mut c = Blockchain::new(2);
+        let (alice, alice_addr) = wallet();
+        let (_, bob_addr) = wallet();
+        c.add_block(vec![Transaction::new(&alice, &bob_addr, 15)], &alice_addr);
+        let b = c.compute_balances();
+        assert_eq!(b[&alice_addr], 35); // coinbase 50 - 15
+        assert_eq!(b[&bob_addr], 15);
+    }
 
-        my_chain.add_block(
-            vec![Transaction::new(&bob_wallet, &charlie_addr, 10)],
-            &bob_addr,
-        );
-        let balance = my_chain.compute_balances();
-        assert_eq!(*balance.get(&alice_addr).unwrap(), 35);
-        assert_eq!(*balance.get(&bob_addr).unwrap(), 55);
-        assert_eq!(*balance.get(&charlie_addr).unwrap(), 10);
+    // ── 链验证 ──────────────────────────────────
 
-        my_chain.add_block(
-            vec![Transaction::new(&charlie_wallet, &alice_addr, 2)],
-            &charlie_addr,
-        );
-        let balance = my_chain.compute_balances();
-        assert_eq!(*balance.get(&alice_addr).unwrap(), 37);
-        assert_eq!(*balance.get(&bob_addr).unwrap(), 55);
-        assert_eq!(*balance.get(&charlie_addr).unwrap(), 58);
-        // 打印整条链的信息
-        println!("\n========== 当前链信息 ==========");
-        for block in &my_chain.chain {
-            println!(
-                "索引: {} | 哈希: {} | 前哈希: {} | 交易: {:?}",
-                block.index,
-                block.hash[..16].to_owned() + "...",
-                block.prev_hash[..16].to_owned() + "...",
-                block.transactions
-            );
-        }
-        // 验证链是否合法
-        println!("\n========== 验证链合法性 ==========");
-        println!("篡改前链是否合法: {}", my_chain.is_valid());
-        assert!(my_chain.is_valid());
-        // 模拟篡改第一个区块的交易（改成不同的金额，这样哈希必定改变）
-        println!("\n========== 开始篡改第一个区块的交易 ==========");
-        my_chain.chain[1].transactions = vec![Transaction::new(&alice_wallet, &bob_addr, 999)];
-        // 篡改后重新计算该区块的哈希（模拟攻击者只改交易和哈希，不重新挖矿）
-        my_chain.chain[1].hash = my_chain.chain[1].calculate_hash();
-        println!("篡改后链是否合法: {}", my_chain.is_valid());
-        assert!(!my_chain.is_valid());
+    #[test]
+    fn test_valid_chain_passes() {
+        let (c, _, _, _, _, _, _) = chain_with_three_blocks();
+        assert!(c.is_valid());
+    }
 
-        // 创建交易
-        let tx_alice2bob = Transaction::new(&alice_wallet, &bob_addr, 15);
-        let tx_bob2charlie = Transaction::new(&bob_wallet, &charlie_addr, 10);
-        let tx_chalie2alice = Transaction::new(&charlie_wallet, &alice_addr, 2);
-        // 模拟交易池
+    #[test]
+    fn test_detect_tampered_transactions() {
+        let (mut c, alice, _, _, bob_addr, _, _) = chain_with_three_blocks();
+        c.chain[1].transactions = vec![Transaction::new(&alice, &bob_addr, 999)];
+        c.chain[1].hash = c.chain[1].calculate_hash();
+        assert!(!c.is_valid());
+    }
+
+    #[test]
+    fn test_detect_broken_link() {
+        let (mut c, _, _, _, _, _, _) = chain_with_three_blocks();
+        c.chain[2].prev_hash = "a".repeat(64);
+        assert!(!c.is_valid());
+    }
+
+    #[test]
+    fn test_detect_invalid_pow() {
+        let (mut c, _, _, _, _, _, _) = chain_with_three_blocks();
+        c.chain[1].nonce = 0;
+        c.chain[1].hash = c.chain[1].calculate_hash();
+        assert!(!c.is_valid());
+    }
+
+    // ── filter_valid_txs ──────────────────────────
+
+    #[test]
+    fn test_filter_accepts_valid_tx() {
+        let (c, alice, _, _, bob_addr, _, _) = chain_with_three_blocks();
+        let tx = Transaction::new(&alice, &bob_addr, 10);
+        let (v, i) = c.filter_valid_txs(vec![tx]);
+        assert_eq!(v.len(), 1);
+        assert_eq!(i.len(), 0);
+    }
+
+    #[test]
+    fn test_filter_rejects_overspend() {
+        let (c, alice, _, _, bob_addr, _, _) = chain_with_three_blocks();
+        let tx = Transaction::new(&alice, &bob_addr, 999);
+        let (v, i) = c.filter_valid_txs(vec![tx]);
+        assert_eq!(v.len(), 0);
+        assert_eq!(i.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_rejects_bad_signature() {
+        let (c, _, _, bob, bob_addr, _, _) = chain_with_three_blocks();
+        let mut tx = Transaction::new(&bob, &bob_addr, 5);
+        tx.sender = "a".repeat(64);
+        let (v, i) = c.filter_valid_txs(vec![tx]);
+        assert_eq!(v.len(), 0);
+        assert_eq!(i.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_coinbase_always_valid() {
+        let c = Blockchain::new(2);
+        let coinbase = Transaction {
+            sender: COINBASE_ADDR.to_string(),
+            receiver: "miner".to_string(),
+            amount: REWARD,
+            signature: String::new(),
+        };
+        let (v, i) = c.filter_valid_txs(vec![coinbase]);
+        assert_eq!(v.len(), 1);
+        assert_eq!(i.len(), 0);
+    }
+
+    // ── Mempool 集成 ────────────────────────────
+
+    #[test]
+    fn test_mempool_full_flow() {
+        let mut c = Blockchain::new(2);
+        let (alice, alice_addr) = wallet();
+        let (_bob, bob_addr) = wallet();
+        let (_miner, miner_addr) = wallet();
+
+        // 给 Alice 50 初始资金
+        c.add_block(vec![], &alice_addr);
+
         let mut pool = MemeryPool::new();
-        pool.submit(tx_alice2bob).unwrap();
-        pool.submit(tx_bob2charlie).unwrap();
-        pool.submit(tx_chalie2alice).unwrap();
-        let txs = pool.select(10);
-        let miner_wallet = generate_wallet();
-        let miner_address = hex::encode(miner_wallet.verifying_key().to_bytes());
-        my_chain.add_block(txs, &miner_address);
-        pool.remove(&my_chain.latest_block().transactions[1..]);
+        pool.submit(Transaction::new(&alice, &bob_addr, 20)).unwrap();
 
+        let selected = pool.select(10);
+        c.add_block(selected, &miner_addr);
+        pool.remove(&c.latest_block().transactions[1..]);
 
+        assert_eq!(c.compute_balances()[&alice_addr], 30); // 50 - 20
+        assert_eq!(c.compute_balances()[&bob_addr], 20);
+        assert_eq!(c.compute_balances()[&miner_addr], 50);
+        assert!(pool.candidate.is_empty());
     }
 }

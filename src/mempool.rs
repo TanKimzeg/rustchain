@@ -39,28 +39,50 @@ impl MemeryPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::transaction::generate_wallet;
+
+    fn make_valid_tx() -> Transaction {
+        let sender = generate_wallet();
+        let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
+        Transaction::new(&sender, &receiver, 100)
+    }
+
     #[test]
-    fn test_mempool() {
+    fn test_submit_accepts_valid() {
         let mut pool = MemeryPool::new();
-        // 模拟账户
-        let alice_wallet = generate_wallet();
-        let alice_addr = hex::encode(alice_wallet.verifying_key().to_bytes());
-        let bob_wallet = generate_wallet();
-        let bob_addr = hex::encode(bob_wallet.verifying_key().to_bytes());
-        let charlie_wallet = generate_wallet();
-        let charlie_addr = hex::encode(charlie_wallet.verifying_key().to_bytes());
+        assert!(pool.submit(make_valid_tx()).is_ok());
+        assert_eq!(pool.candidate.len(), 1);
+    }
 
-        let tx_alice2bob = Transaction::new(&alice_wallet, &bob_addr, 15);
-        let tx_bob2charlie =Transaction::new(&bob_wallet, &charlie_addr, 10);
-        let tx_chalie2alice =Transaction::new(&charlie_wallet, &alice_addr, 2);
-        pool.submit(tx_alice2bob).unwrap();
-        pool.submit(tx_bob2charlie).unwrap();
-        pool.submit(tx_chalie2alice).unwrap();
+    #[test]
+    fn test_select_limits_count() {
+        let mut pool = MemeryPool::new();
+        for _ in 0..5 {
+            pool.submit(make_valid_tx()).unwrap();
+        }
+        assert_eq!(pool.select(3).len(), 3);
+    }
 
-        let selected = pool.select(10);
-        assert!(!selected.is_empty())
+    #[test]
+    fn test_select_less_than_available() {
+        let mut pool = MemeryPool::new();
+        pool.submit(make_valid_tx()).unwrap();
+        assert_eq!(pool.select(10).len(), 1);
+    }
 
+    #[test]
+    fn test_remove_clears_selected() {
+        let mut pool = MemeryPool::new();
+        pool.submit(make_valid_tx()).unwrap();
+        pool.submit(make_valid_tx()).unwrap();
+        let txs = pool.select(2);
+        pool.remove(&txs);
+        assert!(pool.candidate.is_empty());
+    }
+
+    #[test]
+    fn test_select_empty_pool() {
+        let pool = MemeryPool::new();
+        assert!(pool.select(5).is_empty());
     }
 }

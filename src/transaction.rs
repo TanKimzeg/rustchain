@@ -87,3 +87,46 @@ pub fn generate_wallet() -> SigningKey {
     let mut csprng = OsRng {};
     SigningKey::generate(&mut csprng)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::COINBASE_ADDR;
+
+    #[test]
+    fn test_sign_and_verify() {
+        let wallet = generate_wallet();
+        let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
+        let tx = Transaction::new(&wallet, &receiver, 100);
+        assert!(tx.verify());
+    }
+
+    #[test]
+    fn test_coinbase_skip_verify() {
+        let tx = Transaction {
+            sender: COINBASE_ADDR.to_string(),
+            receiver: "anyone".to_string(),
+            amount: 50,
+            signature: String::new(),
+        };
+        assert!(tx.verify());
+    }
+
+    #[test]
+    fn test_tampered_amount_fails_verify() {
+        let wallet = generate_wallet();
+        let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
+        let mut tx = Transaction::new(&wallet, &receiver, 100);
+        tx.amount = 999; // 篡改
+        assert!(!tx.verify());
+    }
+
+    #[test]
+    fn test_serialize_for_signing_excludes_signature() {
+        let wallet = generate_wallet();
+        let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
+        let tx = Transaction::new(&wallet, &receiver, 100);
+        let data = tx.serialize_for_signing();
+        assert!(!data.contains("signature"));
+    }
+}

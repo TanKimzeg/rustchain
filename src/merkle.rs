@@ -34,3 +34,47 @@ pub fn compute_merkle_root(txs: &[Transaction]) -> String {
 
     layer.into_iter().next().unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction::{generate_wallet, Transaction};
+
+    fn make_tx(amount: u64) -> Transaction {
+        let sender = generate_wallet();
+        let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
+        Transaction::new(&sender, &receiver, amount)
+    }
+
+    #[test]
+    fn test_empty_list() {
+        assert_eq!(compute_merkle_root(&[]), "");
+    }
+
+    #[test]
+    fn test_root_length() {
+        const HASH_LEN: usize = 64;
+        assert_eq!(compute_merkle_root(&[make_tx(10)]).len(), HASH_LEN);
+        assert_eq!(compute_merkle_root(&[make_tx(10), make_tx(20)]).len(), HASH_LEN);
+        assert_eq!(
+            compute_merkle_root(&[make_tx(10), make_tx(20), make_tx(30)]).len(),
+            HASH_LEN
+        );
+    }
+
+    #[test]
+    fn test_deterministic() {
+        let txs = vec![make_tx(10), make_tx(20)];
+        let root1 = compute_merkle_root(&txs);
+        let root2 = compute_merkle_root(&txs);
+        assert_eq!(root1, root2);
+    }
+
+    #[test]
+    fn test_single_and_double_differ() {
+        let tx = make_tx(10);
+        let root1 = compute_merkle_root(&[tx.clone()]);
+        let root2 = compute_merkle_root(&[tx, make_tx(20)]);
+        assert_ne!(root1, root2);
+    }
+}
