@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::COINBASE_ADDR;
 
 /// 交易结构体
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Transaction {
     pub sender: String,     // 发送方公钥（hex 编码）
     pub receiver: String,   // 接收方公钥（hex 编码）

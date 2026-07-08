@@ -6,16 +6,17 @@ use sha2::{Digest, Sha256};
 
 use chrono::Utc;
 
-use crate::{COINBASE_ADDR, REWARD, transaction::Transaction};
+use crate::{COINBASE_ADDR, REWARD, merkle, transaction::Transaction};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Block {
     pub index: u32,
     pub timestamp: u64,
-    pub transactions: Vec<Transaction>,
     pub hash: String,
     pub prev_hash: String,
     pub nonce: u64,
+    pub merkle_root: String,
+    pub transactions: Vec<Transaction>,
 }
 
 impl Block {
@@ -29,6 +30,7 @@ impl Block {
             index: 0,
             timestamp,
             transactions,
+            merkle_root: String::new(),
             hash: String::new(),
             prev_hash,
             nonce,
@@ -39,14 +41,9 @@ impl Block {
     /// 计算区块哈希
     pub fn calculate_hash(&self) -> String {
         let mut hasher = Sha256::new();
-        let tx_json: Vec<String> = self.transactions.iter().map(|tx| tx.to_string()).collect();
         let input = format!(
             "{}{}{}{}{}",
-            self.index,
-            self.timestamp,
-            tx_json.join(","),
-            self.prev_hash,
-            self.nonce
+            self.index, self.timestamp, self.merkle_root, self.prev_hash, self.nonce
         );
         hasher.update(input);
         hex::encode(hasher.finalize())
@@ -54,10 +51,12 @@ impl Block {
 
     pub fn new(index: u32, transactions: Vec<Transaction>, prev_hash: String) -> Self {
         let timestamp = Utc::now().timestamp() as u64;
+        let merkle_root = merkle::compute_merkle_root(&transactions);
         let mut block = Block {
             index,
             timestamp,
             transactions,
+            merkle_root,
             nonce: 0,
             hash: String::new(),
             prev_hash,
@@ -141,6 +140,27 @@ impl Blockchain {
                 println!("❌ 区块{}的工作量证明无效！", current.index);
                 return false;
             }
+
+            // 校验4：区块第一笔必须是 coinbase，且只有一笔
+            if current.transactions.is_empty() || current.transactions[0].sender != COINBASE_ADDR {
+                println!("❌ 区块{}缺少或放错了coinbase", current.index);
+                return false;
+            }
+            if current.transactions[1..]
+                .iter()
+                .any(|tx| tx.sender == COINBASE_ADDR)
+            {
+                println!("❌ 区块{}有不止一笔coinbase", current.index);
+                return false;
+            }
+
+            // 校验5：每笔交易签名有效
+            for tx in &current.transactions {
+                if !tx.verify() {
+                    println!("❌ 区块{}存在签名无效的交易", current.index);
+                    return false;
+                }
+            }
         }
         println!("✅ 链验证通过，未被篡改");
         true
@@ -152,7 +172,13 @@ impl Blockchain {
         for block in &self.chain {
             for tx in &block.transactions {
                 if tx.sender != COINBASE_ADDR {
-                    *balances.entry(tx.sender.clone()).or_insert(0) -= tx.amount;
+                    if let Some(_) = balances
+                        .entry(tx.sender.clone())
+                        .or_insert(0)
+                        .checked_sub(tx.amount)
+                    {
+                        *balances.entry(tx.sender.clone()).or_insert(0) -= tx.amount;
+                    }
                 }
                 *balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
             }
@@ -171,8 +197,7 @@ impl Blockchain {
                 // coinbase: 凭空创造货币，加到接收方余额
                 *sim_balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
                 valid.push(tx);
-            } else if tx.verify()
-                && sim_balances.get(&tx.sender).copied().unwrap_or(0) >= tx.amount
+            } else if tx.verify() && sim_balances.get(&tx.sender).copied().unwrap_or(0) >= tx.amount
             {
                 // 普通交易：发送方扣钱，接收方加钱
                 *sim_balances.get_mut(&tx.sender).unwrap() -= tx.amount;
@@ -187,7 +212,7 @@ impl Blockchain {
 }
 #[cfg(test)]
 mod tests {
-    use crate::transaction::generate_wallet;
+    use crate::{mempool::MemeryPool, transaction::generate_wallet};
 
     use super::*;
 
@@ -252,5 +277,22 @@ mod tests {
         my_chain.chain[1].hash = my_chain.chain[1].calculate_hash();
         println!("篡改后链是否合法: {}", my_chain.is_valid());
         assert!(!my_chain.is_valid());
+
+        // 创建交易
+        let tx_alice2bob = Transaction::new(&alice_wallet, &bob_addr, 15);
+        let tx_bob2charlie = Transaction::new(&bob_wallet, &charlie_addr, 10);
+        let tx_chalie2alice = Transaction::new(&charlie_wallet, &alice_addr, 2);
+        // 模拟交易池
+        let mut pool = MemeryPool::new();
+        pool.submit(tx_alice2bob).unwrap();
+        pool.submit(tx_bob2charlie).unwrap();
+        pool.submit(tx_chalie2alice).unwrap();
+        let txs = pool.select(10);
+        let miner_wallet = generate_wallet();
+        let miner_address = hex::encode(miner_wallet.verifying_key().to_bytes());
+        my_chain.add_block(txs, &miner_address);
+        pool.remove(&my_chain.latest_block().transactions[1..]);
+
+
     }
 }
