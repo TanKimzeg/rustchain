@@ -102,11 +102,11 @@ impl Blockchain {
     pub fn add_block(&mut self, transactions: Vec<Transaction>, miner: &str) {
         let prev_hash = self.latest_block().hash.clone();
         let index = self.latest_block().index + 1;
-        // 1. 初始化新区块
+        let total_fee = transactions.iter().fold(0, |sum, tx| sum + tx.fee);
         let coinbase = Transaction {
             sender: COINBASE_ADDR.to_string(),
             receiver: miner.to_string(),
-            amount: REWARD,
+            amount: REWARD + total_fee,
             signature: String::new(),
             fee: 0,
         };
@@ -178,7 +178,7 @@ impl Blockchain {
                         .or_insert(0)
                         .checked_sub(tx.amount)
                     {
-                        *balances.entry(tx.sender.clone()).or_insert(0) -= tx.amount;
+                        *balances.entry(tx.sender.clone()).or_insert(0) -= tx.amount + tx.fee;
                     }
                 }
                 *balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
@@ -198,10 +198,10 @@ impl Blockchain {
                 // coinbase: 凭空创造货币，加到接收方余额
                 *sim_balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
                 valid.push(tx);
-            } else if tx.verify() && sim_balances.get(&tx.sender).copied().unwrap_or(0) >= tx.amount
+            } else if tx.verify() && sim_balances.get(&tx.sender).copied().unwrap_or(0) >= tx.amount + tx.fee
             {
                 // 普通交易：发送方扣钱，接收方加钱
-                *sim_balances.get_mut(&tx.sender).unwrap() -= tx.amount;
+                *sim_balances.get_mut(&tx.sender).unwrap() -= tx.amount + tx.fee;
                 *sim_balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
                 valid.push(tx);
             } else {
@@ -353,9 +353,9 @@ mod tests {
         c.add_block(selected, &miner_addr);
         pool.remove(&c.latest_block().transactions[1..]);
 
-        assert_eq!(c.compute_balances()[&alice_addr], 30); // 50 - 20
+        assert_eq!(c.compute_balances()[&alice_addr], 29); // 50 - 20
         assert_eq!(c.compute_balances()[&bob_addr], 20);
-        assert_eq!(c.compute_balances()[&miner_addr], 50);
+        assert_eq!(c.compute_balances()[&miner_addr], 51);
         assert!(pool.candidate.is_empty());
     }
 }
