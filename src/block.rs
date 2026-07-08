@@ -85,7 +85,7 @@ impl Block {
         println!("挖矿成功！nonce: {}, 哈希: {}", self.nonce, self.hash);
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Blockchain {
     pub chain: Vec<Block>,             // 存储所有区块
     pub difficulty: usize,             // 统一挖矿难度
@@ -243,6 +243,17 @@ impl Blockchain {
             }
         }
         (valid, invalid)
+    }
+
+    pub fn dump(&self, save_path: &str) -> std::io::Result<()> {
+        let block_chain = serde_json::to_string_pretty(self)?;
+        std::fs::write(save_path, block_chain)
+    }
+
+    pub fn load(path: &str) -> std::io::Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        let chain = serde_json::from_str(&json)?;
+        Ok(chain)
     }
 }
 #[cfg(test)]
@@ -412,5 +423,21 @@ mod tests {
         assert_eq!(c.compute_balances()[&bob_addr], 20);
         assert_eq!(c.compute_balances()[&miner_addr], 51);
         assert!(pool.candidate.is_empty());
+    }
+
+    #[test]
+    fn test_save_and_load() {
+        let mut chain = Blockchain::new(2);
+        let (_alice, alice_addr) = wallet();
+        chain.add_block(vec![], &alice_addr);
+
+        chain.dump("test_chain.json").unwrap();
+        let loaded = Blockchain::load("test_chain.json").unwrap();
+
+        assert_eq!(chain.chain.len(), loaded.chain.len());
+        assert_eq!(chain.compute_balances(), loaded.compute_balances());
+        assert!(loaded.is_valid());
+
+        std::fs::remove_file("test_chain.json").ok();
     }
 }
