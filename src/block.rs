@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 
 use chrono::Utc;
 
-use crate::{COINBASE_ADDR, REWARD, merkle, transaction::Transaction};
+use crate::{
+    COINBASE_ADDR, INIT_ADJ_INTERVAL, INIT_TARGET_TIME, REWARD, merkle, transaction::Transaction,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Block {
@@ -15,6 +17,7 @@ pub struct Block {
     pub hash: String,
     pub prev_hash: String,
     pub nonce: u64,
+    pub mined_difficulty: usize,
     pub merkle_root: String,
     pub transactions: Vec<Transaction>,
 }
@@ -34,6 +37,7 @@ impl Block {
             hash: String::new(),
             prev_hash,
             nonce,
+            mined_difficulty: 0,
         };
         block.hash = block.calculate_hash();
         block
@@ -58,6 +62,7 @@ impl Block {
             transactions,
             merkle_root,
             nonce: 0,
+            mined_difficulty: 0,
             hash: String::new(),
             prev_hash,
         };
@@ -75,6 +80,8 @@ impl Block {
         }
         // 挖矿成功，更新最终哈希
         self.hash = self.calculate_hash();
+        // 存入难度
+        self.mined_difficulty = difficulty;
         println!("挖矿成功！nonce: {}, 哈希: {}", self.nonce, self.hash);
     }
 }
@@ -83,6 +90,8 @@ pub struct Blockchain {
     pub chain: Vec<Block>,             // 存储所有区块
     pub difficulty: usize,             // 统一挖矿难度
     pub balance: HashMap<String, u64>, // 余额
+    pub target_block_time: u64,        // 目标出块时间（秒）
+    pub adjustment_interval: u32,      // 每几个块调整一次难度
 }
 impl Blockchain {
     /// 初始化区块链：自动创建创世块
@@ -92,11 +101,35 @@ impl Blockchain {
             chain: vec![genesis],
             difficulty,
             balance: HashMap::new(),
+            target_block_time: INIT_TARGET_TIME,
+            adjustment_interval: INIT_ADJ_INTERVAL,
         }
     }
     /// 获取链上最新的区块
     pub fn latest_block(&self) -> &Block {
         self.chain.last().unwrap()
+    }
+
+    /// 调整难度
+    fn adjust_difficulty(&mut self) {
+        // 还没到调整点，跳过
+        if self.latest_block().index as u32 % self.adjustment_interval != 0 {
+            return;
+        }
+
+        // 取最近 interval 个块的实际时间
+        let start = self.chain.len() - self.adjustment_interval as usize;
+        let actual_time = self.chain.last().unwrap().timestamp - self.chain[start].timestamp;
+
+        let target_time = self.target_block_time * self.adjustment_interval as u64;
+        if actual_time < target_time / 2 {
+            self.difficulty = self.difficulty.saturating_add(1);
+            println!("⛏️  出块过快(+1)，难度增至 {}", self.difficulty);
+        } else if actual_time > target_time * 2 {
+            self.difficulty = self.difficulty.saturating_sub(1);
+            println!("⛏️  出块过慢(-1)，难度降至 {}", self.difficulty);
+        }
+        // 在 target_time/2 ~ target_time*2 之间就不调
     }
     /// 添加新区块到链上
     pub fn add_block(&mut self, transactions: Vec<Transaction>, miner: &str) {
@@ -118,10 +151,10 @@ impl Blockchain {
         new_block.mine_block(self.difficulty);
         // 3. 把区块加到链上
         self.chain.push(new_block);
+        self.adjust_difficulty();
     }
     /// 验证整条链是否合法（核心逻辑：检测是否被篡改）
     pub fn is_valid(&self) -> bool {
-        let prefix = "0".repeat(self.difficulty);
         // 从第二个区块开始遍历（创世块没有前哈希，不需要验证）
         for i in 1..self.chain.len() {
             let current = &self.chain[i];
@@ -137,7 +170,7 @@ impl Blockchain {
                 return false;
             }
             // 校验3：工作量证明是否合法（哈希必须有 difficulty 个前导 0）
-            if &current.hash[..self.difficulty] != prefix {
+            if &current.hash[..self.difficulty] != "0".repeat(current.mined_difficulty) {
                 println!("❌ 区块{}的工作量证明无效！", current.index);
                 return false;
             }
@@ -198,7 +231,8 @@ impl Blockchain {
                 // coinbase: 凭空创造货币，加到接收方余额
                 *sim_balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
                 valid.push(tx);
-            } else if tx.verify() && sim_balances.get(&tx.sender).copied().unwrap_or(0) >= tx.amount + tx.fee
+            } else if tx.verify()
+                && sim_balances.get(&tx.sender).copied().unwrap_or(0) >= tx.amount + tx.fee
             {
                 // 普通交易：发送方扣钱，接收方加钱
                 *sim_balances.get_mut(&tx.sender).unwrap() -= tx.amount + tx.fee;
@@ -213,9 +247,9 @@ impl Blockchain {
 }
 #[cfg(test)]
 mod tests {
-    use ed25519_dalek::SigningKey;
-    use crate::{mempool::MemeryPool, transaction::generate_wallet};
     use super::*;
+    use crate::{mempool::MemeryPool, transaction::generate_wallet};
+    use ed25519_dalek::SigningKey;
 
     /// 生成钱包和地址对
     fn wallet() -> (SigningKey, String) {
@@ -225,14 +259,31 @@ mod tests {
     }
 
     /// 建一条 3 个区块的链（Alice→Bob 15, Bob→Charlie 10, Charlie→Alice 2）
-    fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, SigningKey, String, SigningKey, String) {
+    fn chain_with_three_blocks() -> (
+        Blockchain,
+        SigningKey,
+        String,
+        SigningKey,
+        String,
+        SigningKey,
+        String,
+    ) {
         let mut c = Blockchain::new(2);
         let (alice, alice_addr) = wallet();
         let (bob, bob_addr) = wallet();
         let (charlie, charlie_addr) = wallet();
-        c.add_block(vec![Transaction::new(&alice, &bob_addr, 15, 1)], &alice_addr);
-        c.add_block(vec![Transaction::new(&bob, &charlie_addr, 10, 1)], &bob_addr);
-        c.add_block(vec![Transaction::new(&charlie, &alice_addr, 2, 1)], &charlie_addr);
+        c.add_block(
+            vec![Transaction::new(&alice, &bob_addr, 15, 1)],
+            &alice_addr,
+        );
+        c.add_block(
+            vec![Transaction::new(&bob, &charlie_addr, 10, 1)],
+            &bob_addr,
+        );
+        c.add_block(
+            vec![Transaction::new(&charlie, &alice_addr, 2, 1)],
+            &charlie_addr,
+        );
         (c, alice, alice_addr, bob, bob_addr, charlie, charlie_addr)
     }
 
@@ -252,7 +303,10 @@ mod tests {
         let mut c = Blockchain::new(2);
         let (alice, alice_addr) = wallet();
         let (_, bob_addr) = wallet();
-        c.add_block(vec![Transaction::new(&alice, &bob_addr, 15, 1)], &alice_addr);
+        c.add_block(
+            vec![Transaction::new(&alice, &bob_addr, 15, 1)],
+            &alice_addr,
+        );
         let b = c.compute_balances();
         assert_eq!(b[&alice_addr], 35); // coinbase 50 - 15
         assert_eq!(b[&bob_addr], 15);
@@ -347,7 +401,8 @@ mod tests {
         c.add_block(vec![], &alice_addr);
 
         let mut pool = MemeryPool::new();
-        pool.submit(Transaction::new(&alice, &bob_addr, 20, 1)).unwrap();
+        pool.submit(Transaction::new(&alice, &bob_addr, 20, 1))
+            .unwrap();
 
         let selected = pool.select(10);
         c.add_block(selected, &miner_addr);
