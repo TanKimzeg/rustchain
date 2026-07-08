@@ -26,7 +26,9 @@ impl MemeryPool {
     }
 
     pub fn select(&self, count: usize) -> Vec<Transaction> {
-        self.candidate.iter().take(count).cloned().collect()
+        let mut txs: Vec<_> = self.candidate.iter().cloned().collect();
+        txs.sort_by(|a, b| b.fee.cmp(&a.fee));
+        txs.into_iter().take(count).collect()
     }
 
     pub fn remove(&mut self, txs: &[Transaction]) {
@@ -44,7 +46,7 @@ mod tests {
     fn make_valid_tx() -> Transaction {
         let sender = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        Transaction::new(&sender, &receiver, 100)
+        Transaction::new(&sender, &receiver, 100, 1)
     }
 
     #[test]

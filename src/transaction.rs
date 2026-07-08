@@ -7,21 +7,28 @@ use crate::COINBASE_ADDR;
 /// 交易结构体
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Transaction {
-    pub sender: String,     // 发送方公钥（hex 编码）
-    pub receiver: String,   // 接收方公钥（hex 编码）
-    pub amount: u64,        // 转账金额
-    pub signature: String,  // 发送方的签名
+    pub sender: String,    // 发送方公钥（hex 编码）
+    pub receiver: String,  // 接收方公钥（hex 编码）
+    pub amount: u64,       // 转账金额
+    pub signature: String, // 发送方的签名
+    pub fee: u64,
 }
 
 impl Transaction {
     /// 创建并签名交易
-    pub fn new(sender_keypair: &SigningKey, receiver: impl Into<String>, amount: u64) -> Self {
+    pub fn new(
+        sender_keypair: &SigningKey,
+        receiver: impl Into<String>,
+        amount: u64,
+        fee: u64,
+    ) -> Self {
         let sender_hex = hex::encode(sender_keypair.verifying_key().to_bytes());
 
         let mut tx = Transaction {
             sender: sender_hex,
             receiver: receiver.into(),
             amount,
+            fee,
             signature: String::new(),
         };
         // 只对交易内容签名（排除 signature 字段自身）
@@ -36,6 +43,7 @@ impl Transaction {
             "sender":   self.sender,
             "receiver": self.receiver,
             "amount":   self.amount,
+            "fee": self.fee,
         })
         .to_string()
     }
@@ -72,10 +80,9 @@ impl Transaction {
         let tx_data = self.serialize_for_signing();
         pub_key.verify(tx_data.as_bytes(), &signature).is_ok()
     }
-
 }
 
-impl std::fmt::Display for Transaction  {
+impl std::fmt::Display for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let tx_json = serde_json::to_string(self).expect("Failed to Deserialized");
         write!(f, "{}", tx_json)
@@ -97,7 +104,7 @@ mod tests {
     fn test_sign_and_verify() {
         let wallet = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        let tx = Transaction::new(&wallet, &receiver, 100);
+        let tx = Transaction::new(&wallet, &receiver, 100, 1);
         assert!(tx.verify());
     }
 
@@ -108,6 +115,7 @@ mod tests {
             receiver: "anyone".to_string(),
             amount: 50,
             signature: String::new(),
+            fee: 0,
         };
         assert!(tx.verify());
     }
@@ -116,7 +124,7 @@ mod tests {
     fn test_tampered_amount_fails_verify() {
         let wallet = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        let mut tx = Transaction::new(&wallet, &receiver, 100);
+        let mut tx = Transaction::new(&wallet, &receiver, 100, 1);
         tx.amount = 999; // 篡改
         assert!(!tx.verify());
     }
@@ -125,7 +133,7 @@ mod tests {
     fn test_serialize_for_signing_excludes_signature() {
         let wallet = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        let tx = Transaction::new(&wallet, &receiver, 100);
+        let tx = Transaction::new(&wallet, &receiver, 100, 1);
         let data = tx.serialize_for_signing();
         assert!(!data.contains("signature"));
     }

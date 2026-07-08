@@ -43,7 +43,7 @@ mod tests {
     fn make_tx(amount: u64) -> Transaction {
         let sender = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        Transaction::new(&sender, &receiver, amount)
+        Transaction::new(&sender, &receiver, amount, 1)
     }
 
     #[test]

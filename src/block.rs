@@ -108,6 +108,7 @@ impl Blockchain {
             receiver: miner.to_string(),
             amount: REWARD,
             signature: String::new(),
+            fee: 0,
         };
         let mut all_txs = vec![coinbase];
         all_txs.extend(transactions);
@@ -229,9 +230,9 @@ mod tests {
         let (alice, alice_addr) = wallet();
         let (bob, bob_addr) = wallet();
         let (charlie, charlie_addr) = wallet();
-        c.add_block(vec![Transaction::new(&alice, &bob_addr, 15)], &alice_addr);
-        c.add_block(vec![Transaction::new(&bob, &charlie_addr, 10)], &bob_addr);
-        c.add_block(vec![Transaction::new(&charlie, &alice_addr, 2)], &charlie_addr);
+        c.add_block(vec![Transaction::new(&alice, &bob_addr, 15, 1)], &alice_addr);
+        c.add_block(vec![Transaction::new(&bob, &charlie_addr, 10, 1)], &bob_addr);
+        c.add_block(vec![Transaction::new(&charlie, &alice_addr, 2, 1)], &charlie_addr);
         (c, alice, alice_addr, bob, bob_addr, charlie, charlie_addr)
     }
 
@@ -251,7 +252,7 @@ mod tests {
         let mut c = Blockchain::new(2);
         let (alice, alice_addr) = wallet();
         let (_, bob_addr) = wallet();
-        c.add_block(vec![Transaction::new(&alice, &bob_addr, 15)], &alice_addr);
+        c.add_block(vec![Transaction::new(&alice, &bob_addr, 15, 1)], &alice_addr);
         let b = c.compute_balances();
         assert_eq!(b[&alice_addr], 35); // coinbase 50 - 15
         assert_eq!(b[&bob_addr], 15);
@@ -268,7 +269,7 @@ mod tests {
     #[test]
     fn test_detect_tampered_transactions() {
         let (mut c, alice, _, _, bob_addr, _, _) = chain_with_three_blocks();
-        c.chain[1].transactions = vec![Transaction::new(&alice, &bob_addr, 999)];
+        c.chain[1].transactions = vec![Transaction::new(&alice, &bob_addr, 999, 1)];
         c.chain[1].hash = c.chain[1].calculate_hash();
         assert!(!c.is_valid());
     }
@@ -293,7 +294,7 @@ mod tests {
     #[test]
     fn test_filter_accepts_valid_tx() {
         let (c, alice, _, _, bob_addr, _, _) = chain_with_three_blocks();
-        let tx = Transaction::new(&alice, &bob_addr, 10);
+        let tx = Transaction::new(&alice, &bob_addr, 10, 1);
         let (v, i) = c.filter_valid_txs(vec![tx]);
         assert_eq!(v.len(), 1);
         assert_eq!(i.len(), 0);
@@ -302,7 +303,7 @@ mod tests {
     #[test]
     fn test_filter_rejects_overspend() {
         let (c, alice, _, _, bob_addr, _, _) = chain_with_three_blocks();
-        let tx = Transaction::new(&alice, &bob_addr, 999);
+        let tx = Transaction::new(&alice, &bob_addr, 999, 1);
         let (v, i) = c.filter_valid_txs(vec![tx]);
         assert_eq!(v.len(), 0);
         assert_eq!(i.len(), 1);
@@ -311,7 +312,7 @@ mod tests {
     #[test]
     fn test_filter_rejects_bad_signature() {
         let (c, _, _, bob, bob_addr, _, _) = chain_with_three_blocks();
-        let mut tx = Transaction::new(&bob, &bob_addr, 5);
+        let mut tx = Transaction::new(&bob, &bob_addr, 5, 1);
         tx.sender = "a".repeat(64);
         let (v, i) = c.filter_valid_txs(vec![tx]);
         assert_eq!(v.len(), 0);
@@ -326,6 +327,7 @@ mod tests {
             receiver: "miner".to_string(),
             amount: REWARD,
             signature: String::new(),
+            fee: 0,
         };
         let (v, i) = c.filter_valid_txs(vec![coinbase]);
         assert_eq!(v.len(), 1);
@@ -345,7 +347,7 @@ mod tests {
         c.add_block(vec![], &alice_addr);
 
         let mut pool = MemeryPool::new();
-        pool.submit(Transaction::new(&alice, &bob_addr, 20)).unwrap();
+        pool.submit(Transaction::new(&alice, &bob_addr, 20, 1)).unwrap();
 
         let selected = pool.select(10);
         c.add_block(selected, &miner_addr);
