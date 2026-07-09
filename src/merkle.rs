@@ -1,6 +1,6 @@
-use sha2::{Digest, Sha256};
-use hex;
 use crate::transaction::Transaction;
+use hex;
+use sha2::{Digest, Sha256};
 
 pub fn compute_merkle_root(txs: &[Transaction]) -> String {
     // 1. 空列表返回空字符串
@@ -9,7 +9,8 @@ pub fn compute_merkle_root(txs: &[Transaction]) -> String {
     }
 
     // 2. 把每笔交易哈希 → Vec<String>
-    let mut layer: Vec<String> = txs.iter()
+    let mut layer: Vec<String> = txs
+        .iter()
         .map(|tx| {
             let mut hasher = Sha256::new();
             hasher.update(tx.to_string());
@@ -25,11 +26,14 @@ pub fn compute_merkle_root(txs: &[Transaction]) -> String {
         }
 
         // 两两配对哈希
-        layer = layer.chunks(2).map(|pair| {
-            let mut hasher = Sha256::new();
-            hasher.update(format!("{}{}", pair[0], pair[1]));
-            hex::encode(hasher.finalize())
-        }).collect();
+        layer = layer
+            .chunks(2)
+            .map(|pair| {
+                let mut hasher = Sha256::new();
+                hasher.update(format!("{}{}", pair[0], pair[1]));
+                hex::encode(hasher.finalize())
+            })
+            .collect();
     }
 
     layer.into_iter().next().unwrap_or_default()
@@ -38,12 +42,12 @@ pub fn compute_merkle_root(txs: &[Transaction]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::{generate_wallet, Transaction};
+    use crate::transaction::{Transaction, generate_wallet};
 
     fn make_tx(amount: u64) -> Transaction {
         let sender = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        Transaction::new(&sender, &receiver, amount, 1)
+        Transaction::new(&sender, &receiver, amount, 1, 0)
     }
 
     #[test]
@@ -55,7 +59,10 @@ mod tests {
     fn test_root_length() {
         const HASH_LEN: usize = 64;
         assert_eq!(compute_merkle_root(&[make_tx(10)]).len(), HASH_LEN);
-        assert_eq!(compute_merkle_root(&[make_tx(10), make_tx(20)]).len(), HASH_LEN);
+        assert_eq!(
+            compute_merkle_root(&[make_tx(10), make_tx(20)]).len(),
+            HASH_LEN
+        );
         assert_eq!(
             compute_merkle_root(&[make_tx(10), make_tx(20), make_tx(30)]).len(),
             HASH_LEN

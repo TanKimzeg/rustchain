@@ -2,7 +2,7 @@ use ed25519_dalek::{PUBLIC_KEY_LENGTH, Signature, Signer, SigningKey, Verifier, 
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
-use crate::COINBASE_ADDR;
+use crate::{COINBASE_ADDR, REWARD};
 
 /// 交易结构体
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -11,7 +11,8 @@ pub struct Transaction {
     pub receiver: String,  // 接收方公钥（hex 编码）
     pub amount: u64,       // 转账金额
     pub signature: String, // 发送方的签名
-    pub fee: u64,
+    pub fee: u64,          // 手续费
+    pub nonce: u64,        // 交易数量
 }
 
 impl Transaction {
@@ -21,6 +22,7 @@ impl Transaction {
         receiver: impl Into<String>,
         amount: u64,
         fee: u64,
+        nonce: u64,
     ) -> Self {
         let sender_hex = hex::encode(sender_keypair.verifying_key().to_bytes());
 
@@ -29,6 +31,7 @@ impl Transaction {
             receiver: receiver.into(),
             amount,
             fee,
+            nonce,
             signature: String::new(),
         };
         // 只对交易内容签名（排除 signature 字段自身）
@@ -37,6 +40,17 @@ impl Transaction {
         tx
     }
 
+    /// 创建 coinbase 交易
+    pub fn new_coinbase(miner_addr: &str, fees: u64) -> Self {
+        Self {
+            sender: COINBASE_ADDR.to_string(),
+            receiver: miner_addr.to_string(),
+            amount: REWARD + fees,
+            signature: String::new(),
+            fee: 0,
+            nonce: 0,
+        }
+    }
     /// 返回待签名的数据（sender + receiver + amount，不含 signature）
     pub fn serialize_for_signing(&self) -> String {
         serde_json::json!({
@@ -44,6 +58,7 @@ impl Transaction {
             "receiver": self.receiver,
             "amount":   self.amount,
             "fee": self.fee,
+            "nonce": self.nonce,
         })
         .to_string()
     }
@@ -104,7 +119,7 @@ mod tests {
     fn test_sign_and_verify() {
         let wallet = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        let tx = Transaction::new(&wallet, &receiver, 100, 1);
+        let tx = Transaction::new(&wallet, &receiver, 100, 1, 0);
         assert!(tx.verify());
     }
 
@@ -116,6 +131,7 @@ mod tests {
             amount: 50,
             signature: String::new(),
             fee: 0,
+            nonce: 0,
         };
         assert!(tx.verify());
     }
@@ -124,7 +140,7 @@ mod tests {
     fn test_tampered_amount_fails_verify() {
         let wallet = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        let mut tx = Transaction::new(&wallet, &receiver, 100, 1);
+        let mut tx = Transaction::new(&wallet, &receiver, 100, 1, 0);
         tx.amount = 999; // 篡改
         assert!(!tx.verify());
     }
@@ -133,7 +149,7 @@ mod tests {
     fn test_serialize_for_signing_excludes_signature() {
         let wallet = generate_wallet();
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        let tx = Transaction::new(&wallet, &receiver, 100, 1);
+        let tx = Transaction::new(&wallet, &receiver, 100, 1, 0);
         let data = tx.serialize_for_signing();
         assert!(!data.contains("signature"));
     }
