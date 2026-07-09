@@ -27,13 +27,13 @@ impl AppState {
 }
 
 /// GET /chain — 返回整条链
-pub async fn get_chain(state: State<AppState>) -> Json<Value> {
+pub async fn get_chain(State(state): State<AppState>) -> Json<Value> {
     let chain = state.blockchain.lock().unwrap();
     Json(serde_json::to_value(&chain.chain).unwrap())
 }
 
 /// GET /balance/{address} — 查询地址余额
-pub async fn get_balance(state: State<AppState>, Path(address): Path<String>) -> Json<Value> {
+pub async fn get_balance(State(state): State<AppState>, Path(address): Path<String>) -> Json<Value> {
     let chain = state.blockchain.lock().unwrap();
     let balances = chain.compute_balances();
     Json(json!({
@@ -43,14 +43,14 @@ pub async fn get_balance(state: State<AppState>, Path(address): Path<String>) ->
 }
 
 /// GET /mempool — 查看待处理交易
-pub async fn get_mempool(state: State<AppState>) -> Json<Value> {
+pub async fn get_mempool(State(state): State<AppState>) -> Json<Value> {
     let pool = state.test_miner.pool.lock().unwrap();
     let txs: Vec<&Transaction> = pool.candidate.iter().collect();
     Json(serde_json::to_value(&txs).unwrap())
 }
 
 /// POST /tx — 提交交易到交易池
-pub async fn submit_tx(state: State<AppState>, Json(tx): Json<Transaction>) -> Json<Value> {
+pub async fn submit_tx(State(state): State<AppState>, Json(tx): Json<Transaction>) -> Json<Value> {
     let mut pool = state.test_miner.pool.lock().unwrap();
     match pool.submit(tx) {
         Ok(_) => Json(json!({"status": "ok"})),
@@ -59,7 +59,7 @@ pub async fn submit_tx(state: State<AppState>, Json(tx): Json<Transaction>) -> J
 }
 
 /// POST /save — 持久化区块链
-pub async fn save_chain(state: State<AppState>) -> Json<Value> {
+pub async fn save_chain(State(state): State<AppState>) -> Json<Value> {
     let chain = state.blockchain.lock().unwrap();
     match chain.dump("blockchain.json") {
         Ok(_) => Json(json!({"status": "saved"})),
