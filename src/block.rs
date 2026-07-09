@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use chrono::Utc;
 
 use crate::{
-    COINBASE_ADDR, INIT_ADJ_INTERVAL, INIT_TARGET_TIME, REWARD, merkle, transaction::Transaction,
+    COINBASE_ADDR, INIT_ADJ_INTERVAL, INIT_TARGET_TIME, merkle, transaction::Transaction,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -131,72 +131,56 @@ impl Blockchain {
         }
         // 在 target_time/2 ~ target_time*2 之间就不调
     }
+    /// 验证区块
+    fn check_block(&self, block: &Block) -> Result<(), String> {
+        // 校验1：当前区块的哈希是否被篡改
+        if block.hash != block.calculate_hash() {
+            return Err(format!("❌ 区块{}的哈希不匹配，被篡改！", block.index));
+        }
+        // 校验2：当前区块的前哈希是否和前一个区块的哈希一致
+        if block.prev_hash != self.chain[block.index as usize - 1].hash {
+            return Err(format!("❌ 区块{}的前哈希不匹配，链断裂！", block.index));
+        }
+        // 校验3：工作量证明是否合法（哈希必须有 difficulty 个前导 0）
+        if &block.hash[..block.mined_difficulty] != "0".repeat(block.mined_difficulty) {
+            return Err(format!("❌ 区块{}的工作量证明无效！", block.index));
+        }
+
+        // 校验4：区块第一笔必须是 coinbase，且只有一笔
+        if block.transactions.is_empty() || block.transactions[0].sender != COINBASE_ADDR {
+            return Err(format!("❌ 区块{}缺少或放错了coinbase", block.index));
+        }
+        if block.transactions[1..]
+            .iter()
+            .any(|tx| tx.sender == COINBASE_ADDR)
+        {
+            return Err(format!("❌ 区块{}有不止一笔coinbase", block.index));
+        }
+
+        // 校验5：每笔交易签名有效
+        for tx in &block.transactions {
+            if !tx.verify() {
+                return Err(format!("❌ 区块{}存在签名无效的交易", block.index));
+            }
+        }
+        Ok(())
+    }
     /// 添加新区块到链上
-    pub fn add_block(&mut self, transactions: Vec<Transaction>, miner: &str) {
-        let prev_hash = self.latest_block().hash.clone();
-        let index = self.latest_block().index + 1;
-        let total_fee = transactions.iter().fold(0, |sum, tx| sum + tx.fee);
-        let coinbase = Transaction {
-            sender: COINBASE_ADDR.to_string(),
-            receiver: miner.to_string(),
-            amount: REWARD + total_fee,
-            signature: String::new(),
-            fee: 0,
-        };
-        let mut all_txs = vec![coinbase];
-        all_txs.extend(transactions);
-        let (valid_txs, _invalid_txs) = self.filter_valid_txs(all_txs);
-        let mut new_block = Block::new(index, valid_txs, prev_hash);
-        // 2. 挖矿（工作量证明）
-        new_block.mine_block(self.difficulty);
-        // 3. 把区块加到链上
-        self.chain.push(new_block);
+    pub fn add_block(&mut self, block: Block) -> Result<(), String> {
+        self.check_block(&block)?;
+        self.chain.push(block);
         self.adjust_difficulty();
+        Ok(())
     }
     /// 验证整条链是否合法（核心逻辑：检测是否被篡改）
     pub fn is_valid(&self) -> bool {
         // 从第二个区块开始遍历（创世块没有前哈希，不需要验证）
         for i in 1..self.chain.len() {
             let current = &self.chain[i];
-            let prev = &self.chain[i - 1];
-            // 校验1：当前区块的哈希是否被篡改
-            if current.hash != current.calculate_hash() {
-                println!("❌ 区块{}的哈希不匹配，被篡改！", current.index);
+            if let Err(_) = self.check_block(current) {
                 return false;
-            }
-            // 校验2：当前区块的前哈希是否和前一个区块的哈希一致
-            if current.prev_hash != prev.hash {
-                println!("❌ 区块{}的前哈希不匹配，链断裂！", current.index);
-                return false;
-            }
-            // 校验3：工作量证明是否合法（哈希必须有 difficulty 个前导 0）
-            if &current.hash[..self.difficulty] != "0".repeat(current.mined_difficulty) {
-                println!("❌ 区块{}的工作量证明无效！", current.index);
-                return false;
-            }
-
-            // 校验4：区块第一笔必须是 coinbase，且只有一笔
-            if current.transactions.is_empty() || current.transactions[0].sender != COINBASE_ADDR {
-                println!("❌ 区块{}缺少或放错了coinbase", current.index);
-                return false;
-            }
-            if current.transactions[1..]
-                .iter()
-                .any(|tx| tx.sender == COINBASE_ADDR)
-            {
-                println!("❌ 区块{}有不止一笔coinbase", current.index);
-                return false;
-            }
-
-            // 校验5：每笔交易签名有效
-            for tx in &current.transactions {
-                if !tx.verify() {
-                    println!("❌ 区块{}存在签名无效的交易", current.index);
-                    return false;
-                }
             }
         }
-        println!("✅ 链验证通过，未被篡改");
         true
     }
 
@@ -259,7 +243,7 @@ impl Blockchain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mempool::MemeryPool, transaction::generate_wallet};
+    use crate::{COINBASE_ADDR, REWARD, mempool::MemeryPool, transaction::generate_wallet};
     use ed25519_dalek::SigningKey;
 
     /// 生成钱包和地址对
@@ -267,6 +251,25 @@ mod tests {
         let w = generate_wallet();
         let addr = hex::encode(w.verifying_key().to_bytes());
         (w, addr)
+    }
+
+    /// 测试辅助：从交易列表创建已挖好的区块
+    fn make_block(chain: &Blockchain, txs: Vec<Transaction>, miner_addr: &str) -> Block {
+        let prev = chain.latest_block();
+        let fees: u64 = txs.iter().map(|t| t.fee).sum();
+        let coinbase = Transaction {
+            sender: COINBASE_ADDR.to_string(),
+            receiver: miner_addr.to_string(),
+            amount: REWARD + fees,
+            signature: String::new(),
+            fee: 0,
+        };
+        let mut all_txs = vec![coinbase];
+        all_txs.extend(txs);
+        let (valid, _) = chain.filter_valid_txs(all_txs);
+        let mut block = Block::new(prev.index + 1, valid, prev.hash.clone());
+        block.mine_block(chain.difficulty);
+        block
     }
 
     /// 建一条 3 个区块的链（Alice→Bob 15, Bob→Charlie 10, Charlie→Alice 2）
@@ -283,18 +286,9 @@ mod tests {
         let (alice, alice_addr) = wallet();
         let (bob, bob_addr) = wallet();
         let (charlie, charlie_addr) = wallet();
-        c.add_block(
-            vec![Transaction::new(&alice, &bob_addr, 15, 1)],
-            &alice_addr,
-        );
-        c.add_block(
-            vec![Transaction::new(&bob, &charlie_addr, 10, 1)],
-            &bob_addr,
-        );
-        c.add_block(
-            vec![Transaction::new(&charlie, &alice_addr, 2, 1)],
-            &charlie_addr,
-        );
+        let _ = c.add_block(make_block(&c, vec![Transaction::new(&alice, &bob_addr, 15, 1)], &alice_addr));
+        let _ = c.add_block(make_block(&c, vec![Transaction::new(&bob, &charlie_addr, 10, 1)], &bob_addr));
+        let _ = c.add_block(make_block(&c, vec![Transaction::new(&charlie, &alice_addr, 2, 1)], &charlie_addr));
         (c, alice, alice_addr, bob, bob_addr, charlie, charlie_addr)
     }
 
@@ -314,10 +308,7 @@ mod tests {
         let mut c = Blockchain::new(2);
         let (alice, alice_addr) = wallet();
         let (_, bob_addr) = wallet();
-        c.add_block(
-            vec![Transaction::new(&alice, &bob_addr, 15, 1)],
-            &alice_addr,
-        );
+        let _ = c.add_block(make_block(&c, vec![Transaction::new(&alice, &bob_addr, 15, 1)], &alice_addr));
         let b = c.compute_balances();
         assert_eq!(b[&alice_addr], 35); // coinbase 50 - 15
         assert_eq!(b[&bob_addr], 15);
@@ -409,14 +400,14 @@ mod tests {
         let (_miner, miner_addr) = wallet();
 
         // 给 Alice 50 初始资金
-        c.add_block(vec![], &alice_addr);
+        let _ = c.add_block(make_block(&c, vec![], &alice_addr));
 
         let mut pool = MemeryPool::new();
         pool.submit(Transaction::new(&alice, &bob_addr, 20, 1))
             .unwrap();
 
         let selected = pool.select(10);
-        c.add_block(selected, &miner_addr);
+        let _ = c.add_block(make_block(&c, selected, &miner_addr));
         pool.remove(&c.latest_block().transactions[1..]);
 
         assert_eq!(c.compute_balances()[&alice_addr], 29); // 50 - 20
@@ -429,7 +420,7 @@ mod tests {
     fn test_save_and_load() {
         let mut chain = Blockchain::new(2);
         let (_alice, alice_addr) = wallet();
-        chain.add_block(vec![], &alice_addr);
+        let _ = chain.add_block(make_block(&chain, vec![], &alice_addr));
 
         chain.dump("test_chain.json").unwrap();
         let loaded = Blockchain::load("test_chain.json").unwrap();
