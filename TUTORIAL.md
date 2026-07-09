@@ -21,6 +21,9 @@
 13. [持久化——让链活下来](#13-持久化让链活下来)
 14. [测试的艺术](#14-测试的艺术)
 15. [回顾与下一步](#15-回顾与下一步)
+16. [Nonce——防重放攻击](#16-nonce防重放攻击)
+17. [Miner 解耦——矿工独立循环](#17-miner-解耦矿工独立循环)
+18. [HTTP API——与链交互](#18-http-api与链交互)
 
 ---
 
@@ -841,11 +844,12 @@ fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, /* ... */) {
 
 | 模块             | 测试数 | 覆盖内容                                                                          |
 | ---------------- | ------ | --------------------------------------------------------------------------------- |
-| `transaction.rs` | 4      | 验签、coinbase 跳过、篡改拒绝、签名排除                                           |
-| `merkle.rs`      | 4      | 空列表、长度、确定性、单双不同                                                    |
-| `mempool.rs`     | 5      | 提交、数量限制、不足时、移除、空池                                                |
-| `block.rs`       | 12     | 创世块、余额、链有效、篡改/断裂/PoW 检测、filter 各种场景、mempool 全流程、持久化 |
-| **总计**         | **25** |                                                                                   |
+| `transaction.rs` | 4      | 验签、coinbase、篡改拒绝、签名排除                                     |
+| `merkle.rs`      | 4      | 空列表、长度、确定性、单双不同                                          |
+| `mempool.rs`     | 9      | 池操作(5) + Miner 组装区块(3) + start_new(1)                            |
+| `block.rs`       | 8      | 创世块、余额、链有效、篡改/断裂/PoW 检测、全流程、持久化               |
+| `api.rs`         | 5      | 链查询、余额、无效签名拒绝、提交+查池流程                               |
+| **总计**         | **30** |                                                                         |
 
 ### 学到了什么
 
@@ -870,6 +874,10 @@ fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, /* ... */) {
     │                                        │
     ├── 手续费 ─→ 难度调整 ─→ 持久化           │
     │                                        │
+    ├── Nonce 防重放 ─→ 状态推导重构            │
+    │                                        │
+    ├── Miner 解耦 ─→ HTTP API                │
+    │                                        │
     └── 模块化测试 ←───────────────────────────┘
 ```
 
@@ -888,16 +896,391 @@ fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, /* ... */) {
 | 经济激励     | Coinbase = REWARD + fees             |
 | 自我调节     | `adjust_difficulty()`                |
 | 持久化       | `save()` / `load()`                  |
+| 防重放       | `nonce` + `get_tx_count()`           |
+| 关注点分离   | `Blockchain` / `Miner` 解耦           |
+| RPC 接口     | axum HTTP API                        |
 
 **这些就是主流公链核心机制的 80%——无论 Bitcoin 的 UTXO 还是 Ethereum 的账户模型，底层都是这些构件。**
 
 ### 接下来可以做什么
 
-- **CLI / HTTP API** — 把链变成可交互的工具
 - **P2P 网络** — 多节点同步、分叉处理、共识协议
 - **UTXO 模型** — 改用 inputs/outputs 替代 account 模型。Bitcoin 用 UTXO，Ethereum 用账户——两种设计各有优劣，值得都试一遍
 - **智能合约** — 在交易里嵌入可执行脚本
 - **钱包生成** — 助记词、BIP32 分层确定性钱包
+
+---
+
+## 16. Nonce——防重放攻击
+
+### 问题：Bob 收到了两笔钱
+
+当前交易只有 `sender / receiver / amount / fee / signature`。假设：
+
+1. Alice 签了一笔交易：`Alice → Bob, 10 元`
+2. 矿工打包进区块，Alice 扣了 10 元
+3. Bob **拿到这笔交易原文**，重新广播到网络
+4. 矿工看到签名合法、Alice 余额够，**又打包一次**
+5. Alice 再扣 10 元，Bob 再收 10 元
+
+Bob 可以无限重放，直到 Alice 没钱。这就是**重放攻击**。
+
+### 解决方案：Nonce
+
+每个账户维护一个计数器，每发一笔交易就 +1。交易里带上当前的 nonce，节点校验：
+
+```
+tx.nonce == account_nonce[sender]  → 接受，然后 account_nonce[sender]++
+tx.nonce != account_nonce[sender]  → 拒绝（过时或乱序）
+```
+
+重放攻击的那笔交易 nonce 已经用过了，自然被拒绝。
+
+### 改动
+
+**Transaction 结构体新增 `nonce` 字段：**
+
+```rust
+pub struct Transaction {
+    pub sender: String,
+    pub receiver: String,
+    pub amount: u64,
+    pub signature: String,
+    pub fee: u64,
+    pub nonce: u64,  // ← 新增
+}
+```
+
+**Nonce 必须纳入签名范围**，否则攻击者可以改 nonce 重新签名：
+
+```rust
+pub fn serialize_for_signing(&self) -> String {
+    serde_json::json!({
+        "sender":   self.sender,
+        "receiver": self.receiver,
+        "amount":   self.amount,
+        "fee": self.fee,
+        "nonce": self.nonce,  // ← 关键！不签名 = nonce 可被篡改
+    })
+    .to_string()
+}
+```
+
+**`Transaction::new_coinbase()` 统一创建 coinbase：**
+
+```rust
+pub fn new_coinbase(miner_addr: &str, fees: u64) -> Self {
+    Self {
+        sender: COINBASE_ADDR.to_string(),
+        receiver: miner_addr.to_string(),
+        amount: REWARD + fees,
+        signature: String::new(),
+        fee: 0,
+        nonce: 0,
+    }
+}
+```
+
+矿工奖励构造从多处手动 `Transaction { ... }` 集中到了一处。
+
+### 链上 nonce 状态推导
+
+类似余额推导，nonce 状态也从链上所有交易重推：
+
+```rust
+pub fn get_tx_count(&self) -> Result<HashMap<String, u64>, String> {
+    let mut tx_count = HashMap::new();
+    for block in &self.chain {
+        for tx in &block.transactions {
+            if tx_count.get(&tx.sender).unwrap_or(&0u64) == &tx.nonce {
+                *tx_count.entry(tx.sender.clone()).or_insert(0u64) += 1;
+            } else if tx.sender != COINBASE_ADDR {
+                return Err(format!("nonce 不连续"));
+            }
+        }
+    }
+    Ok(tx_count)
+}
+```
+
+这段代码判断逻辑很直白：对每个 sender，当前链上记录的 nonce 应该是 `0, 1, 2, 3, ...`。如果某笔交易的 nonce 不等于预期的下一个值，说明这条链上有 nonce 冲突。
+
+### `is_valid` 同时检查余额和 nonce
+
+```rust
+pub fn is_valid(&self) -> Result<(), String> {
+    for i in 1..self.chain.len() {
+        self.check_block(&self.chain[i])?;
+    }
+    let _balances = self.compute_balances()?;
+    let _tx_count = self.get_tx_count()?;
+    Ok(())
+}
+```
+
+余额 + nonce 双维度校验，缺一不可。
+
+### 学到了什么
+
+- **防重放靠状态机，不是靠签名**——签名只证明"是你发的"，不证明"你发过几次"。nonce 跟踪的是**状态**。
+- **Nonce 必须被签名**——否则攻击者可以改了 nonce 重新广播，绕过 nonce 检查。
+- `Result` 比 `bool` 更适合 `is_valid`——调用方直接知道"哪里坏了"而不是"就是坏了"。
+- 状态推导是不可变的——链是事实来源，计算是纯函数，没有"缓存不一致"的问题。
+
+---
+
+## 17. Miner 解耦——矿工独立循环
+
+### 问题：链不该挖矿
+
+最初的代码里，`Blockchain` 做了所有事：
+
+```rust
+chain.add_block(txs, &miner_addr);
+    // → 创建 coinbase
+    // → 过滤交易
+    // → 计算 Merkle root
+    // → 挖矿（PoW 循环！）
+    // → 上链
+    // → 调整难度
+```
+
+链的逻辑和矿工的逻辑混在一起。但现实中，**链只关心"收到合法区块 → 追加到链尾"**，至于这个块是挖出来的还是别人广播的，链不需要知道。
+
+### 解耦后的接口
+
+**`Blockchain` 只做校验和上链：**
+
+```rust
+pub fn add_block(&mut self, block: Block) -> Result<(), String> {
+    self.check_block(&block)?;
+    self.chain.push(block);
+    self.adjust_difficulty();
+    Ok(())
+}
+```
+
+**`Miner` 负责组装区块和挖矿：**
+
+```rust
+pub struct Miner {
+    pub address: String,
+    pub pool: Arc<Mutex<MemeryPool>>,
+    pub chain: Arc<Mutex<Blockchain>>,
+    pub tx_count: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+impl Miner {
+    pub fn assemble_block(&self) -> Block {
+        // 1. 从交易池选交易
+        let txs = self.pool.lock().unwrap().select(10);
+        // 2. 创建 coinbase
+        let coinbase = Transaction::new_coinbase(&self.address, fees);
+        // 3. 过滤无效交易（含 nonce 检查）
+        let (valid_txs, _) = self.filter_valid_txs(all_txs);
+        // 4. 创建区块、挖矿
+        let mut block = Block::new(...);
+        block.mine_block(difficulty);
+        block
+    }
+
+    pub fn start_mining_loop(&self) {
+        // 后台线程：5 秒循环挖矿
+        std::thread::spawn(move || loop {
+            let block = miner.assemble_block();
+            miner.chain.lock().unwrap().add_block(block).ok();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+    }
+}
+```
+
+### 数据流
+
+```
+用户提交 tx → MemeryPool
+                  ↓
+Miner.select(10) → 组装区块 → filter_valid_txs（余额+nonce）
+                  ↓
+Block.new → mine_block（PoW）
+                  ↓
+Blockchain.add_block（校验+上链）
+                  ↓
+Miner 从 pool 移除已上链 tx
+```
+
+### 关键设计
+
+- **`Miner::assemble_block()` 不依赖外部参数**——它自己持有 pool、chain、nonce 状态的 `Arc` 引用，自包含
+- **`filter_valid_txs` 移到 Miner**——因为"什么交易合法"是矿工决定的，不是链决定的
+- **`start_new` 一键创建运行中的矿工**——同时初始化随机地址、空交易池、启动后台挖矿
+
+### 学到了什么
+
+- **关注点分离**：链 = 存储 + 验证，矿工 = 组装 + 计算。两个职责，两个结构体。
+- **共享状态用 `Arc<Mutex<>>`**——矿工和 API 共享同一个链和交易池实例，这是 Rust 给多线程安全上的约束。
+- **矿工决定交易有效性**——`filter_valid_txs` 在 Miner 里而不是 Blockchain 里，因为不同矿工可能有不同的交易过滤策略。
+
+---
+
+## 18. HTTP API——与链交互
+
+### 问题：只能通过测试和代码操作
+
+现在链、交易池、矿工都写好了，但只能通过 Rust 代码或测试来使用。要让普通人（和其他程序）能用，需要一个 HTTP 接口。
+
+### 技术选型
+
+- **axum 0.8** — Rust 生态最主流的 async web 框架之一
+- **tokio** — Rust 异步运行时，axum 基于它
+- **`Arc<Mutex<>>`** — 共享链和矿工状态
+
+### 项目结构
+
+```
+src/
+├── main.rs       # HTTP 服务器入口
+├── lib.rs        # 模块声明
+├── api.rs        # 路由处理器
+├── block.rs      # 区块链
+├── transaction.rs
+├── mempool.rs    # 交易池 + Miner
+└── merkle.rs
+```
+
+### AppState
+
+所有处理器共享同一个链和矿工实例：
+
+```rust
+#[derive(Clone)]
+pub struct AppState {
+    pub blockchain: Arc<Mutex<Blockchain>>,
+    pub test_miner: Miner,  // Miner 内部也是 Arc<Mutex<>>，Clone 无成本
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        let chain = Arc::new(Mutex::new(
+            Blockchain::load("blockchain.json")
+                .unwrap_or(Blockchain::new(4)),
+        ));
+        Self {
+            blockchain: chain.clone(),
+            test_miner: Miner::start_new(chain),
+        }
+    }
+}
+```
+
+### 路由定义
+
+```rust
+let app = Router::new()
+    .route("/chain", get(get_chain))
+    .route("/balance/{address}", get(get_balance))
+    .route("/mempool", get(get_mempool))
+    .route("/tx", post(submit_tx))
+    .route("/save", post(save_chain))
+    .route("/load", post(load_chain))
+    .with_state(AppState::new());
+```
+
+### 处理器示例
+
+**查询余额：**
+
+```rust
+pub async fn get_balance(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> Json<Value> {
+    let chain = state.blockchain.lock().unwrap();
+    let balances = chain.compute_balances().unwrap();
+    Json(json!({
+        "address": address,
+        "balance": balances.get(&address).copied().unwrap_or(0),
+    }))
+}
+```
+
+**提交交易：**
+
+```rust
+pub async fn submit_tx(
+    State(state): State<AppState>,
+    Json(tx): Json<Transaction>,
+) -> Json<Value> {
+    let mut pool = state.test_miner.pool.lock().unwrap();
+    match pool.submit(tx) {
+        Ok(_) => Json(json!({"status": "ok"})),
+        Err(e) => Json(json!({"status": "error", "message": e})),
+    }
+}
+```
+
+### 启动服务器
+
+```bash
+cargo run
+# 🚀 RustChain server running on http://127.0.0.1:3000
+```
+
+测试：
+
+```bash
+# 查看链
+curl http://127.0.0.1:3000/chain
+
+# 查询余额
+curl http://127.0.0.1:3000/balance/COINBASE
+
+# 提交交易（需要先生成签名交易）
+curl -X POST http://127.0.0.1:3000/tx \
+  -H "Content-Type: application/json" \
+  -d '{"sender":"...","receiver":"...","amount":10,"fee":1,"nonce":0,"signature":"..."}'
+
+# 交易池
+curl http://127.0.0.1:3000/mempool
+
+# 持久化
+curl -X POST http://127.0.0.1:3000/save
+```
+
+### 测试 API
+
+API 处理器的测试直接调用函数（不需要启动服务器）：
+
+```rust
+#[tokio::test]
+async fn test_submit_tx_and_query_mempool() {
+    let state = make_test_state();
+    // ...
+    let resp = submit_tx(State(state.clone()), Json(tx)).await;
+    assert_eq!(resp.0["status"], "ok");
+
+    let mempool_resp = get_mempool(State(state)).await;
+    assert_eq!(mempool_resp.0.as_array().unwrap().len(), 1);
+}
+```
+
+### 当前测试覆盖
+
+| 模块             | 测试数 | 覆盖内容                                                  |
+| ---------------- | ------ | --------------------------------------------------------- |
+| `transaction.rs` | 4      | 验签、coinbase、篡改拒绝、签名排除                        |
+| `merkle.rs`      | 4      | 空列表、长度、确定性、单双不同                            |
+| `mempool.rs`     | 9      | 池操作(5) + Miner 组装区块(3) + start_new(1)              |
+| `block.rs`       | 8      | 创世块、余额、链有效、篡改/断裂/PoW 检测、全流程、持久化 |
+| `api.rs`         | 5      | 链查询、余额、无效签名拒绝、提交流程                     |
+| **总计**         | **30** |                                                           |
+
+### 学到了什么
+
+- **axum 的 `State` 提取器**让共享状态注入到处理器变得简单
+- **`Miner` 自带交易池**——API 不再需要单独管理 pool，所有操作通过 Miner
+- **后台矿工自动循环**——启动服务器后矿工就自动挖矿，不需要手动触发
+- **测试直接调用函数**——比启动 HTTP 服务器测试更快、更可控
 
 ---
 
