@@ -35,7 +35,7 @@ pub async fn get_chain(State(state): State<AppState>) -> Json<Value> {
 /// GET /balance/{address} — 查询地址余额
 pub async fn get_balance(State(state): State<AppState>, Path(address): Path<String>) -> Json<Value> {
     let chain = state.blockchain.lock().unwrap();
-    let balances = chain.compute_balances();
+    let balances = chain.compute_balances().unwrap();
     Json(json!({
         "address": address,
         "balance": balances.get(&address).copied().unwrap_or(0),
@@ -86,7 +86,6 @@ mod tests {
     use crate::{
         COINBASE_ADDR, REWARD,
         block::Block,
-        mempool::MemeryPool,
         transaction::generate_wallet,
     };
     use ed25519_dalek::SigningKey;
@@ -99,12 +98,7 @@ mod tests {
 
     fn make_test_state() -> AppState {
         let chain = Arc::new(Mutex::new(Blockchain::new(2)));
-        let pool = Arc::new(Mutex::new(MemeryPool::new()));
-        let miner = Miner {
-            address: "test_api".to_string(),
-            pool: pool.clone(),
-            chain: chain.clone(),
-        };
+        let miner = Miner::start_new(chain.clone());
         AppState {
             blockchain: chain,
             test_miner: miner,
@@ -135,15 +129,8 @@ mod tests {
         {
             let mut chain = state.blockchain.lock().unwrap();
             let prev = chain.latest_block();
-            let coinbase = Transaction {
-                sender: COINBASE_ADDR.to_string(),
-                receiver: alice_addr.clone(),
-                amount: REWARD,
-                signature: String::new(),
-                fee: 0,
-            };
-            let (valid, _) = chain.filter_valid_txs(vec![coinbase]);
-            let mut block = Block::new(prev.index + 1, valid, prev.hash.clone());
+            let coinbase = Transaction::new_coinbase(&alice_addr, 0);
+            let mut block = Block::new(prev.index + 1, vec![coinbase], prev.hash.clone());
             block.mine_block(chain.difficulty);
             chain.add_block(block).unwrap();
         }
@@ -160,6 +147,7 @@ mod tests {
             amount: 100,
             signature: "bad".to_string(),
             fee: 1,
+            nonce: 0,
         };
         let resp = submit_tx(State(state), Json(tx)).await;
         assert_eq!(resp.0["status"], "error");
@@ -179,14 +167,14 @@ mod tests {
                 amount: REWARD,
                 signature: String::new(),
                 fee: 0,
+                nonce: 0,
             };
-            let (valid, _) = chain.filter_valid_txs(vec![coinbase]);
-            let mut block = Block::new(prev.index + 1, valid, prev.hash.clone());
+            let mut block = Block::new(prev.index + 1, vec![coinbase], prev.hash.clone());
             block.mine_block(chain.difficulty);
             chain.add_block(block).unwrap();
         }
         let receiver = hex::encode(generate_wallet().verifying_key().to_bytes());
-        let tx = Transaction::new(&alice, &receiver, 10, 1);
+        let tx = Transaction::new(&alice, &receiver, 10, 1, 3);
         let resp = submit_tx(State(state.clone()), Json(tx)).await;
         assert_eq!(resp.0["status"], "ok");
         // 验证交易池里有它
