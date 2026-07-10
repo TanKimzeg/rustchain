@@ -848,7 +848,7 @@ fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, /* ... */) {
 | `merkle.rs`      | 4      | 空列表、长度、确定性、单双不同                                          |
 | `mempool.rs`     | 9      | 池操作(5) + Miner 组装区块(3) + start_new(1)                            |
 | `block.rs`       | 8      | 创世块、余额、链有效、篡改/断裂/PoW 检测、全流程、持久化               |
-| `api.rs`         | 5      | 链查询、余额、无效签名拒绝、提交+查池流程                               |
+| `api.rs`         | 5      | 链查询、地址详情、无效签名拒绝、提交+查池流程                          |
 | **总计**         | **30** |                                                                         |
 
 ### 学到了什么
@@ -899,6 +899,7 @@ fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, /* ... */) {
 | 防重放       | `nonce` + `get_tx_count()`           |
 | 关注点分离   | `Blockchain` / `Miner` 解耦           |
 | RPC 接口     | axum HTTP API                        |
+| 状态缓存     | `AddressDetail` + `update_metadata_delta` |
 
 **这些就是主流公链核心机制的 80%——无论 Bitcoin 的 UTXO 还是 Ethereum 的账户模型，底层都是这些构件。**
 
@@ -1025,7 +1026,75 @@ pub fn is_valid(&self) -> Result<(), String> {
 - **防重放靠状态机，不是靠签名**——签名只证明"是你发的"，不证明"你发过几次"。nonce 跟踪的是**状态**。
 - **Nonce 必须被签名**——否则攻击者可以改了 nonce 重新广播，绕过 nonce 检查。
 - `Result` 比 `bool` 更适合 `is_valid`——调用方直接知道"哪里坏了"而不是"就是坏了"。
-- 状态推导是不可变的——链是事实来源，计算是纯函数，没有"缓存不一致"的问题。
+- **状态推导是可恢复的**——链是事实来源，计算是纯函数。缓存只是加速，决不可丢失真相。
+
+### 优化：增量状态缓存
+
+每次查询都扫全链显然不现实。真实节点维护**状态缓存**，新块来时只应用增量：
+
+```rust
+pub struct Blockchain {
+    pub chain: Vec<Block>,
+    // ...
+    #[serde(skip)]
+    pub address_details: HashMap<String, AddressDetail>,  // 缓存，不持久化
+}
+```
+
+每个地址的缓存信息：
+
+```rust
+pub struct AddressDetail {
+    balance: u64,
+    nonce: u64,
+    txs: Vec<Transaction>,
+}
+```
+
+`add_block` 成功后同步更新缓存：
+
+```rust
+pub fn add_block(&mut self, block: Block) -> Result<(), String> {
+    self.check_block(&block)?;
+    self.update_metadata_delta(&block);  // 增量更新
+    self.chain.push(block);
+    self.adjust_difficulty();
+    Ok(())
+}
+```
+
+`update_metadata_delta` 只处理新区块里的交易，逐笔加减余额、推进 nonce、记录交易历史：
+
+```rust
+fn update_metadata_delta(&mut self, new_block: &Block) {
+    for tx in &new_block.transactions {
+        if tx.sender != COINBASE_ADDR {
+            // 发送方：扣款（含手续费）、nonce +1
+            let entry = self.address_details.entry(tx.sender.clone()).or_default();
+            entry.balance -= tx.amount + tx.fee;
+            entry.nonce += 1;
+            entry.txs.push(tx.clone());
+        }
+        // 接收方：入账
+        let entry = self.address_details.entry(tx.receiver.clone()).or_default();
+        entry.balance += tx.amount;
+        entry.txs.push(tx.clone());
+    }
+}
+```
+
+加载时缓存为空，从链重建：
+
+```rust
+pub fn load(path: &str) -> std::io::Result<Self> {
+    let json = std::fs::read_to_string(path)?;
+    let mut chain = serde_json::from_str::<Blockchain>(&json)?;
+    chain.recover_state()?;  // 遍历所有 block 重建缓存
+    Ok(chain)
+}
+```
+
+`compute_balances()` / `get_tx_count()` 仍保留，用于 `is_valid` 全量验证——缓存可能损坏，链推导永远可信。
 
 ---
 
@@ -1178,7 +1247,7 @@ impl AppState {
 ```rust
 let app = Router::new()
     .route("/chain", get(get_chain))
-    .route("/balance/{address}", get(get_balance))
+    .route("/detail/{address}", get(get_detail))
     .route("/mempool", get(get_mempool))
     .route("/tx", post(submit_tx))
     .route("/save", post(save_chain))
@@ -1188,19 +1257,28 @@ let app = Router::new()
 
 ### 处理器示例
 
-**查询余额：**
+**查询地址详情（余额 + nonce + 交易历史）：**
 
 ```rust
-pub async fn get_balance(
+pub async fn get_detail(
     State(state): State<AppState>,
     Path(address): Path<String>,
 ) -> Json<Value> {
     let chain = state.blockchain.lock().unwrap();
-    let balances = chain.compute_balances().unwrap();
-    Json(json!({
-        "address": address,
-        "balance": balances.get(&address).copied().unwrap_or(0),
-    }))
+    let details = &chain.address_details;  // 使用缓存，不扫全链
+    Json(serde_json::to_value(details.get(&address)).unwrap())
+}
+```
+
+返回 `AddressDetail` JSON：
+
+```json
+{
+  "balance": 35,
+  "nonce": 1,
+  "txs": [
+    { "sender": "alice_pubkey...", "receiver": "bob_pubkey...", "amount": 15, ... }
+  ]
 }
 ```
 
@@ -1232,8 +1310,8 @@ cargo run
 # 查看链
 curl http://127.0.0.1:3000/chain
 
-# 查询余额
-curl http://127.0.0.1:3000/balance/COINBASE
+# 查询地址详情（余额 + nonce + 交易历史）
+curl http://127.0.0.1:3000/detail/COINBASE
 
 # 提交交易（需要先生成签名交易）
 curl -X POST http://127.0.0.1:3000/tx \
