@@ -7,7 +7,10 @@ edition = "2024"
 axum = "0.8.9"
 chrono = "0.4.45"
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+env_logger = "0.11.11"
 hex = "0.4.3"
+libp2p = { version = "0.56.0", features = ["gossipsub", "mdns", "tokio"] }
+log = "0.4.33"
 rand = { version = "0.8.0", features = ["std"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["std"] }

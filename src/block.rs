@@ -71,7 +71,7 @@ impl Block {
     /// 难度用哈希前导0的数量表示，比如难度4就是哈希前4位是0
     pub fn mine_block(&mut self, difficulty: usize) {
         let prefix = "0".repeat(difficulty);
-        println!("开始挖矿，难度: {}（前导0数量）", difficulty);
+        log::info!("开始挖矿，难度: {}（前导0数量）", difficulty);
         // 循环修改nonce，直到哈希满足前导0要求
         while &self.calculate_hash()[..difficulty] != prefix {
             self.nonce += 1;
@@ -80,7 +80,7 @@ impl Block {
         self.hash = self.calculate_hash();
         // 存入难度
         self.mined_difficulty = difficulty;
-        println!("挖矿成功！nonce: {}, 哈希: {}", self.nonce, self.hash);
+        log::info!("挖矿成功！nonce: {}, 哈希: {}", self.nonce, self.hash);
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -137,10 +137,10 @@ impl Blockchain {
         let target_time = self.target_block_time * self.adjustment_interval as u64;
         if actual_time < target_time / 2 {
             self.difficulty = self.difficulty.saturating_add(1);
-            println!("⛏️  出块过快(+1)，难度增至 {}", self.difficulty);
+            log::info!("⛏️  出块过快(+1)，难度增至 {}", self.difficulty);
         } else if actual_time > target_time * 2 {
             self.difficulty = self.difficulty.saturating_sub(1);
-            println!("⛏️  出块过慢(-1)，难度降至 {}", self.difficulty);
+            log::info!("⛏️  出块过慢(-1)，难度降至 {}", self.difficulty);
         }
         // 在 target_time/2 ~ target_time*2 之间就不调
     }
