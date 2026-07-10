@@ -83,13 +83,28 @@ impl Block {
         println!("挖矿成功！nonce: {}, 哈希: {}", self.nonce, self.hash);
     }
 }
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AddressDetail {
+    balance: u64,
+    nonce: u64,
+    txs: Vec<Transaction>,
+}
+
+/// 增量地址元数据，由 update_metadata_delta 维护
+impl AddressDetail {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Blockchain {
-    pub chain: Vec<Block>, // 存储所有区块
-    pub difficulty: usize, // 统一挖矿难度
-    // pub balance: HashMap<String, u64>, // 余额
+    pub chain: Vec<Block>,        // 存储所有区块
+    pub difficulty: usize,        // 统一挖矿难度
     pub target_block_time: u64,   // 目标出块时间（秒）
     pub adjustment_interval: u32, // 每几个块调整一次难度
+    #[serde(skip)]
+    pub address_details: HashMap<String, AddressDetail>, // 增量缓存的地址元数据
 }
 impl Blockchain {
     /// 初始化区块链：自动创建创世块
@@ -98,9 +113,9 @@ impl Blockchain {
         Blockchain {
             chain: vec![genesis],
             difficulty,
-            // balance: HashMap::new(),
             target_block_time: INIT_TARGET_TIME,
             adjustment_interval: INIT_ADJ_INTERVAL,
+            address_details: HashMap::new(),
         }
     }
     /// 获取链上最新的区块
@@ -167,6 +182,8 @@ impl Blockchain {
     /// 添加新区块到链上
     pub fn add_block(&mut self, block: Block) -> Result<(), String> {
         self.check_block(&block)?;
+        // 增量更新地址元数据
+        self.update_metadata_delta(&block);
         self.chain.push(block);
         self.adjust_difficulty();
         Ok(())
@@ -228,6 +245,31 @@ impl Blockchain {
         Ok(tx_count)
     }
 
+    /// 增量更新地址元数据（balance + tx_count）
+    fn update_metadata_delta(&mut self, new_block: &Block) {
+        for tx in &new_block.transactions {
+            // 发送方扣款（含费）
+            if tx.sender != COINBASE_ADDR {
+                self.address_details.entry(tx.sender.clone()).or_default();
+                self.address_details
+                    .entry(tx.sender.clone())
+                    .and_modify(|s| {
+                        s.balance -= tx.amount+tx.fee;
+                        s.nonce += 1;
+                        s.txs.push(tx.clone());
+                    });
+            }
+            // 接收方收款
+            self.address_details.entry(tx.receiver.clone()).or_default();
+            self.address_details
+                .entry(tx.receiver.clone())
+                .and_modify(|s| {
+                    s.balance += tx.amount;
+                    s.txs.push(tx.clone());
+                });
+        }
+    }
+
     pub fn dump(&self, save_path: &str) -> std::io::Result<()> {
         let block_chain = serde_json::to_string_pretty(self)?;
         std::fs::write(save_path, block_chain)
@@ -235,8 +277,17 @@ impl Blockchain {
 
     pub fn load(path: &str) -> std::io::Result<Self> {
         let json = std::fs::read_to_string(path)?;
-        let chain = serde_json::from_str(&json)?;
+        let mut chain = serde_json::from_str::<Blockchain>(&json)?;
+        chain.recover_state().unwrap();
         Ok(chain)
+    }
+
+    /// 重新推理状态
+    fn recover_state(&mut self) -> Result<(), String> {
+        for block in self.chain.clone() {
+            self.update_metadata_delta(&block);
+        }
+        Ok(())
     }
 }
 #[cfg(test)]

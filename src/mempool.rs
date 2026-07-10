@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::transaction::generate_wallet;
@@ -130,7 +130,6 @@ mod tests {
             address: "test_miner".to_string(),
             pool: pool.clone(),
             chain: chain_arc.clone(),
-            tx_count: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let block = miner.assemble_block();
@@ -161,7 +160,6 @@ mod tests {
             address: "miner".to_string(),
             pool: pool.clone(),
             chain: chain_arc.clone(),
-            tx_count: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let block = miner.assemble_block();
@@ -208,7 +206,6 @@ pub struct Miner {
     pub address: String,
     pub pool: Arc<Mutex<MemeryPool>>,
     pub chain: Arc<Mutex<Blockchain>>,
-    pub tx_count: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl Miner {
@@ -249,7 +246,6 @@ impl Miner {
         let miner = Self {
             address: hex::encode(generate_wallet().verifying_key().to_bytes()),
             pool: Arc::new(Mutex::new(MemeryPool::new())),
-            tx_count: Arc::new(Mutex::new(HashMap::new())),
             chain,
         };
         miner.start_mining_loop();
@@ -260,14 +256,15 @@ impl Miner {
     pub fn filter_valid_txs(&self, txs: Vec<Transaction>) -> (Vec<Transaction>, Vec<Transaction>) {
         let mut valid = txs.clone();
         let mut invalid = Vec::new();
-        // 从已上链的区块推导当前余额，然后逐笔模拟本批交易
-        let mut sim_balances = self.chain.lock().unwrap().compute_balances().unwrap();
-        let tx_count = self.tx_count.lock().unwrap();
+        // 从已上链的区块推导当前余额和 nonce，然后逐笔模拟本批交易
+        let chain = self.chain.lock().unwrap();
+        let mut sim_balances = chain.compute_balances().unwrap();
+        let mut sim_tx_count = chain.get_tx_count().unwrap();
+        drop(chain); // 释放锁
         for (i, tx) in txs.iter().enumerate() {
             if tx.sender == COINBASE_ADDR {
                 // coinbase: 凭空创造货币，加到接收方余额
                 *sim_balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
-                // valid.push(tx.clone());
                 continue;
             }
             if tx.verify()
@@ -276,17 +273,18 @@ impl Miner {
                 // 普通交易：发送方扣钱，接收方加钱
                 *sim_balances.get_mut(&tx.sender).unwrap() -= tx.amount + tx.fee;
                 *sim_balances.entry(tx.receiver.clone()).or_insert(0) += tx.amount;
-                // valid.push(tx.clone());
             } else {
                 invalid.push(tx.clone());
                 valid.remove(i);
                 continue;
             }
             // 检查交易nonce
-            if tx_count.get(&tx.sender).unwrap_or(&0u64) != &tx.nonce {
+            if sim_tx_count.get(&tx.sender).unwrap_or(&0u64) != &tx.nonce {
                 invalid.push(tx.clone());
                 valid.remove(i);
                 continue;
+            } else{
+                sim_tx_count.insert(tx.sender.clone(), tx.nonce+1);
             }
         }
         (valid, invalid)

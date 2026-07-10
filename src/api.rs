@@ -32,14 +32,11 @@ pub async fn get_chain(State(state): State<AppState>) -> Json<Value> {
     Json(serde_json::to_value(&chain.chain).unwrap())
 }
 
-/// GET /balance/{address} — 查询地址余额
-pub async fn get_balance(State(state): State<AppState>, Path(address): Path<String>) -> Json<Value> {
+/// GET /detail/{address} — 查询地址余额
+pub async fn get_detail(State(state): State<AppState>, Path(address): Path<String>) -> Json<Value> {
     let chain = state.blockchain.lock().unwrap();
-    let balances = chain.compute_balances().unwrap();
-    Json(json!({
-        "address": address,
-        "balance": balances.get(&address).copied().unwrap_or(0),
-    }))
+    let details = &chain.address_details;
+    Json(serde_json::to_value(details.get(&address)).unwrap())
 }
 
 /// GET /mempool — 查看待处理交易
@@ -82,12 +79,8 @@ pub async fn load_chain(state: State<AppState>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{COINBASE_ADDR, REWARD, block::Block, transaction::generate_wallet};
     use axum::extract::State;
-    use crate::{
-        COINBASE_ADDR, REWARD,
-        block::Block,
-        transaction::generate_wallet,
-    };
     use ed25519_dalek::SigningKey;
 
     fn make_wallet() -> (SigningKey, String) {
@@ -117,8 +110,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_balance_returns_zero_for_unknown() {
         let state = make_test_state();
-        let resp = get_balance(State(state), Path("nonexistent".into())).await;
-        assert_eq!(resp.0["balance"], 0);
+        let resp = get_detail(State(state), Path("nonexistent".into())).await;
+        assert!(resp.0.is_null());
     }
 
     #[tokio::test]
@@ -134,7 +127,7 @@ mod tests {
             block.mine_block(chain.difficulty);
             chain.add_block(block).unwrap();
         }
-        let resp = get_balance(State(state), Path(alice_addr)).await;
+        let resp = get_detail(State(state), Path(alice_addr)).await;
         assert_eq!(resp.0["balance"], REWARD);
     }
 

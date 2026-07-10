@@ -2,16 +2,14 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use rustchain::api::{
-    AppState, get_balance, get_chain, get_mempool, load_chain, save_chain, submit_tx,
-};
+use rustchain::api::{AppState, get_chain, get_detail, get_mempool, load_chain, save_chain, submit_tx};
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
     let app = Router::new()
         .route("/chain", get(get_chain))
-        .route("/balance/{address}", get(get_balance))
+        .route("/detail/{address}", get(get_detail))
         .route("/mempool", get(get_mempool))
         .route("/tx", post(submit_tx))
         // .route("/mine", post(mine_block))
