@@ -48,8 +48,7 @@ pub async fn get_mempool(State(state): State<AppState>) -> Json<Value> {
 
 /// POST /tx — 提交交易到交易池
 pub async fn submit_tx(State(state): State<AppState>, Json(tx): Json<Transaction>) -> Json<Value> {
-    let mut pool = state.test_miner.pool.lock().unwrap();
-    match pool.submit(tx) {
+    match state.test_miner.submit_tx(tx) {
         Ok(_) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"status": "error", "message": e})),
     }

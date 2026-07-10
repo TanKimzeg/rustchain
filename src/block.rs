@@ -85,12 +85,12 @@ impl Block {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AddressDetail {
-    balance: u64,
-    nonce: u64,
-    txs: Vec<Transaction>,
+    pub balance: u64,
+    pub nonce: u64,
+    pub txs: Vec<Transaction>,
 }
 
-/// 增量地址元数据，由 update_metadata_delta 维护
+/// 增量地址元数据，由 `update_metadata_delta` 维护
 impl AddressDetail {
     pub fn new() -> Self {
         Self::default()
@@ -418,8 +418,7 @@ mod tests {
         let _ = c.add_block(make_block(&c, vec![], &alice_addr));
 
         let mut pool = MemeryPool::new();
-        pool.submit(Transaction::new(&alice, &bob_addr, 20, 1, 2))
-            .unwrap();
+        pool.push(Transaction::new(&alice, &bob_addr, 20, 1, 2));
 
         let selected = pool.select(10);
         let _ = c.add_block(make_block(&c, selected, &miner_addr));

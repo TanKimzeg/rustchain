@@ -21,13 +21,8 @@ impl MemeryPool {
         }
     }
     // 提交交易
-    pub fn submit(&mut self, tx: Transaction) -> Result<(), String> {
-        if tx.verify() {
-            self.candidate.insert(tx);
-        } else {
-            return Err("Invalid Transaction".to_string());
-        }
-        Ok(())
+    pub fn push(&mut self, tx: Transaction) {
+        self.candidate.insert(tx);
     }
 
     pub fn select(&self, count: usize) -> Vec<Transaction> {
@@ -57,17 +52,10 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_accepts_valid() {
-        let mut pool = MemeryPool::new();
-        assert!(pool.submit(make_valid_tx()).is_ok());
-        assert_eq!(pool.candidate.len(), 1);
-    }
-
-    #[test]
     fn test_select_limits_count() {
         let mut pool = MemeryPool::new();
         for _ in 0..5 {
-            pool.submit(make_valid_tx()).unwrap();
+            pool.push(make_valid_tx());
         }
         assert_eq!(pool.select(3).len(), 3);
     }
@@ -75,15 +63,15 @@ mod tests {
     #[test]
     fn test_select_less_than_available() {
         let mut pool = MemeryPool::new();
-        pool.submit(make_valid_tx()).unwrap();
+        pool.push(make_valid_tx());
         assert_eq!(pool.select(10).len(), 1);
     }
 
     #[test]
     fn test_remove_clears_selected() {
         let mut pool = MemeryPool::new();
-        pool.submit(make_valid_tx()).unwrap();
-        pool.submit(make_valid_tx()).unwrap();
+        pool.push(make_valid_tx());
+        pool.push(make_valid_tx());
         let txs = pool.select(2);
         pool.remove(&txs);
         assert!(pool.candidate.is_empty());
@@ -154,7 +142,7 @@ mod tests {
 
         // Alice 提交交易
         let tx = Transaction::new(&alice, &bob_addr, 10, 1, 0);
-        pool.lock().unwrap().submit(tx.clone()).unwrap();
+        pool.lock().unwrap().push(tx.clone());
 
         let miner = Miner {
             address: "miner".to_string(),
@@ -223,7 +211,11 @@ impl Miner {
 
         let chain = self.chain.lock().unwrap();
         let prev_block = chain.latest_block();
-        let mut block = Block::new(prev_block.index + 1, valid_txs.clone(), prev_block.hash.clone());
+        let mut block = Block::new(
+            prev_block.index + 1,
+            valid_txs.clone(),
+            prev_block.hash.clone(),
+        );
         block.mine_block(chain.difficulty); // PoW 循环在这里
         self.pool.lock().unwrap().remove(&valid_txs);
         block
@@ -283,10 +275,18 @@ impl Miner {
                 invalid.push(tx.clone());
                 valid.remove(i);
                 continue;
-            } else{
-                sim_tx_count.insert(tx.sender.clone(), tx.nonce+1);
+            } else {
+                sim_tx_count.insert(tx.sender.clone(), tx.nonce + 1);
             }
         }
         (valid, invalid)
+    }
+
+    pub fn submit_tx(&self, tx: Transaction) -> Result<(), &'static str> {
+        if !tx.verify() {
+            return Err("Invalid signature");
+        }
+        self.pool.lock().unwrap().push(tx);
+        Ok(())
     }
 }
