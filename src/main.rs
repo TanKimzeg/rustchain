@@ -14,16 +14,22 @@ use tokio::net::TcpListener;
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    // 共享状态
+
+    // 1. 创建链和矿工（矿工还没开始挖矿）
     let blockchain = Arc::new(Mutex::new(
         Blockchain::load("blockchain.json").unwrap_or(Blockchain::new(4)),
     ));
-    let miner = Arc::new(Miner::start_new(blockchain.clone()));
+    let mut miner = Miner::start_new(blockchain.clone());
 
-    // 启动 P2P（后台），拿到广播通道
-    let p2p_tx = build_p2p(&miner.key_pair, (*miner).clone(), 3001);
+    // 2. 启动 P2P（后台），拿到广播通道
+    let p2p_tx = build_p2p(&miner.key_pair, miner.clone(), 3001);
 
-    // HTTP API
+    // 3. 设置矿工的广播通道，然后开始挖矿
+    miner.broadcaster = Some(p2p_tx.clone());
+    miner.start_mining_loop();
+
+    // 4. 启动 HTTP API（共享矿工状态）
+    let miner = Arc::new(miner);
     let app = Router::new()
         .route("/chain", get(get_chain))
         .route("/detail/{address}", get(get_detail))

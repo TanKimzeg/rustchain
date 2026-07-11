@@ -17,6 +17,8 @@ pub const BLOCKCHAIN_TOPIC: &str = "rustchain";
 pub enum P2PMessage {
     NewBlock(Block),
     NewTransaction(Transaction),
+    SyncRequest,
+    SyncResponse(Vec<Block>),
 }
 
 /// libp2p 的行为组合
@@ -88,6 +90,7 @@ pub fn publish_message(
 async fn handle_p2p_event(
     event: libp2p::swarm::SwarmEvent<BlockchainBehaviourEvent>,
     miner: &Miner,
+    broadcaster: &mpsc::UnboundedSender<P2PMessage>,
 ) {
     match event {
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Gossip(gossipsub::Event::Message {
@@ -105,6 +108,23 @@ async fn handle_p2p_event(
                         log::info!("📩 P2P 收到交易");
                         miner.submit_tx(tx).ok();
                     }
+                    P2PMessage::SyncRequest => {
+                        log::info!("📩 P2P 收到同步请求");
+                        let chain = miner.chain.lock().unwrap();
+                        let blocks = chain.chain.clone();
+                        drop(chain);
+                        broadcaster.send(P2PMessage::SyncResponse(blocks)).ok();
+                    }
+                    P2PMessage::SyncResponse(blocks) => {
+                        log::info!("📩 P2P 收到同步响应 ({} 个区块)", blocks.len());
+                        let mut chain = miner.chain.lock().unwrap();
+                        if blocks.len() > chain.chain.len() {
+                            for block in blocks {
+                                chain.add_block(block).ok();
+                            }
+                            log::info!("同步完成，当前高度 {}", chain.chain.len() - 1);
+                        }
+                    }
                 }
             }
         }
@@ -112,7 +132,8 @@ async fn handle_p2p_event(
             list,
         ))) => {
             for (peer_id, addr) in list {
-                log::info!("发现新节点: {} @ {}", peer_id, addr);
+                log::info!("发现新节点: {} @ {}，发起同步", peer_id, addr);
+                broadcaster.send(P2PMessage::SyncRequest).ok();
             }
         }
         _ => {}
@@ -134,11 +155,12 @@ pub fn build_p2p(
 
     let (tx, mut rx) = mpsc::unbounded_channel();
 
+    let tx_clone = tx.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 event = swarm.select_next_some() => {
-                    handle_p2p_event(event, &miner).await;
+                    handle_p2p_event(event, &miner, &tx_clone).await;
                 }
                 Some(msg) = rx.recv() => {
                     publish_message(&mut swarm, &topic, msg);

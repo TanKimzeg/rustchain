@@ -9,6 +9,9 @@ use crate::{
     transaction::Transaction,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+use crate::p2p::P2PMessage;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MemeryPool {
@@ -120,6 +123,7 @@ mod tests {
             key_pair,
             pool: pool.clone(),
             chain: chain_arc.clone(),
+            broadcaster: None,
         };
 
         let block = miner.assemble_block();
@@ -150,6 +154,7 @@ mod tests {
             key_pair: generate_wallet(),
             pool: pool.clone(),
             chain: chain_arc.clone(),
+            broadcaster: None,
         };
 
         let block = miner.assemble_block();
@@ -196,6 +201,7 @@ pub struct Miner {
     pub key_pair: SigningKey,
     pub pool: Arc<Mutex<MemeryPool>>,
     pub chain: Arc<Mutex<Blockchain>>,
+    pub broadcaster: Option<mpsc::UnboundedSender<P2PMessage>>,
 }
 
 impl Miner {
@@ -223,13 +229,17 @@ impl Miner {
         block
     }
 
-    /// 后台循环挖矿
+    /// 后台循环挖矿（含区块广播）
     pub fn start_mining_loop(&self) {
         let miner = self.clone();
         std::thread::spawn(move || {
             loop {
                 let block = miner.assemble_block();
-                miner.chain.lock().unwrap().add_block(block).ok();
+                if miner.chain.lock().unwrap().add_block(block.clone()).is_ok() {
+                    if let Some(ref tx) = miner.broadcaster {
+                        let _ = tx.send(P2PMessage::NewBlock(block));
+                    }
+                }
 
                 std::thread::sleep(std::time::Duration::from_secs(5));
             }
@@ -237,13 +247,12 @@ impl Miner {
     }
 
     pub fn start_new(chain: Arc<Mutex<Blockchain>>) -> Self {
-        let miner = Self {
+        Self {
             key_pair: generate_wallet(),
             pool: Arc::new(Mutex::new(MemeryPool::new())),
             chain,
-        };
-        miner.start_mining_loop();
-        miner
+            broadcaster: None,
+        }
     }
 
     /// 从交易列表中过滤出合法/非法的交易
