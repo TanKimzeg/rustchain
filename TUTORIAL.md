@@ -1355,7 +1355,7 @@ async fn test_submit_tx_and_query_mempool() {
 | `block.rs`       | 8      | 创世块、余额、链有效、篡改/断裂/PoW 检测、全流程、持久化 |
 | `api.rs`         | 5      | 链查询、余额、无效签名拒绝、提交流程                     |
 | `p2p.rs`         | —      | 集成测试在 `tests/`                                      |
-| **总计**         | **30** |                                                           |
+| **总计**         | **31** |                                                           |
 
 ### 学到了什么
 
@@ -1474,6 +1474,75 @@ let keypair = identity::Keypair::ed25519_from_bytes(signing_key.to_bytes()).unwr
 
 这样节点的链上地址和 P2P 的 PeerId 来自同一把密钥，逻辑统一。
 
+### 区块广播
+
+矿工挖到块后自动通知全网。实现方式：Miner 持有一个 `broadcaster` 通道，挖矿成功后将 `NewBlock` 发到该通道：
+
+```rust
+pub struct Miner {
+    pub key_pair: SigningKey,
+    pub pool: Arc<Mutex<MemeryPool>>,
+    pub chain: Arc<Mutex<Blockchain>>,
+    pub broadcaster: Option<mpsc::UnboundedSender<P2PMessage>>,  // ← 广播通道
+}
+
+// 挖矿循环中，add_block 成功后广播
+pub fn start_mining_loop(&self) {
+    let miner = self.clone();
+    std::thread::spawn(move || loop {
+        let block = miner.assemble_block();
+        if miner.chain.lock().unwrap().add_block(block.clone()).is_ok() {
+            if let Some(ref tx) = miner.broadcaster {
+                let _ = tx.send(P2PMessage::NewBlock(block));
+            }
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    });
+}
+```
+
+`build_p2p()` 创建好 P2P 节点后返回 `UnboundedSender`，启动时赋值给矿工：
+
+```rust
+let p2p_tx = build_p2p(&miner.key_pair, miner.clone(), 3001);
+miner.broadcaster = Some(p2p_tx.clone());
+miner.start_mining_loop();  // 矿工开始挖矿，挖到自动广播
+```
+
+### 链同步
+
+新节点加入时，需要从现有节点下载完整链。通过两种消息类型实现：
+
+```rust
+pub enum P2PMessage {
+    NewBlock(Block),
+    NewTransaction(Transaction),
+    SyncRequest,             // ← 请求同步
+    SyncResponse(Vec<Block>), // ← 响应：完整链
+}
+```
+
+收到 `SyncRequest` → 返回本地全部区块
+收到 `SyncResponse` → 逐个 `add_block`，追上最新高度
+mDNS 发现新节点 → 自动发送 `SyncRequest`
+
+```rust
+// handle_p2p_event 中处理同步
+P2PMessage::SyncRequest => {
+    let chain = miner.chain.lock().unwrap();
+    let blocks = chain.chain.clone();
+    broadcaster.send(P2PMessage::SyncResponse(blocks)).ok();
+}
+P2PMessage::SyncResponse(blocks) => {
+    let mut chain = miner.chain.lock().unwrap();
+    if blocks.len() > chain.chain.len() {
+        for block in blocks {
+            chain.add_block(block).ok();
+        }
+    }
+}
+```
+
 ### 集成测试
 
 测试两个节点能否建立连接并交换消息：
@@ -1505,10 +1574,10 @@ async fn test_gossip_message_exchange() {
 | ---------------- | ------ | ----------------------------------------------------------- |
 | `transaction.rs` | 4      | 验签、coinbase、篡改拒绝、签名排除                          |
 | `merkle.rs`      | 4      | 空列表、长度、确定性、单双不同                              |
-| `mempool.rs`     | 9      | 池操作(5) + Miner 组装区块(3) + start_new(1)                |
+| `mempool.rs`     | 8      | 池操作(4) + Miner 组装区块(3) + start_new(1)                |
 | `block.rs`       | 8      | 创世块、余额、链有效、篡改/断裂/PoW 检测、全流程、持久化   |
 | `api.rs`         | 5      | 链查询、余额、无效签名拒绝、提交和查池流程                  |
-| `p2p.rs`         | —      | 集成测试在 `tests/p2p_test.rs`（1 个）                      |
+| `tests/`         | 2      | API 集成测试（真实 HTTP）+ P2P 集成测试（双节点互联）       |
 | **总计**         | **31** |                                                             |
 
 ### 学到了什么
@@ -1517,6 +1586,8 @@ async fn test_gossip_message_exchange() {
 - **gossipsub 比洪泛高效**——每个消息只转发给部分节点，指数级扩散，而非线性爆炸
 - **异步事件循环管理一切**——`tokio::select!` 同时监听网络事件和本地广播请求，一个循环处理所有 I/O
 - **Sender/Receiver 解耦**——API 层只需持有一个 `Sender`，不需要知道 P2P 的内部状态
+- **区块广播 = 挖矿 + 通道**——矿工后台线程不关心网络细节，只往通道发消息；P2P 循环只关心转发，不知道交易内容
+- **请求/响应模式**——`SyncRequest` / `SyncResponse` 是 P2P 中除广播外的第二种通信模式，gossipsub 消息类型支持双向交互
 
 ---
 

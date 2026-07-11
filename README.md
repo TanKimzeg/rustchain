@@ -7,14 +7,14 @@
 ## 架构
 
 ```
-main.rs          HTTP 服务器 (axum :3000) + P2P 节点 (libp2p :3001)
- │
- ├── api.rs      HTTP 处理器
- ├── block.rs    区块 + 区块链 (PoW、难度调整、状态缓存)
- ├── transaction.rs  交易 + ed25519 签名
- ├── merkle.rs   Merkle 树
- ├── mempool.rs  交易池 + Miner (独立挖矿循环)
- └── p2p.rs      libp2p 网络 (gossipsub + mDNS)
+    主程序 main.rs  (axum :3000 + libp2p :3001)
+       │
+       ├── api.rs          HTTP 处理器
+       ├── block.rs        区块 + 区块链核心
+       ├── transaction.rs  交易 + ed25519 签名
+       ├── merkle.rs       Merkle 树
+       ├── mempool.rs      交易池 + 独立矿工
+       └── p2p.rs          libp2p 网络 (gossipsub + mDNS)
 ```
 
 ## 使用
@@ -53,6 +53,8 @@ cargo run -- --port 3002  # 需要实现 CLI 参数
 | 交易池 | MemeryPool，按 fee 排序 |
 | HTTP API | axum 0.8，6 个端点 |
 | P2P 网络 | libp2p gossipsub + mDNS |
+| 区块广播 | 矿工挖矿后自动广播到网络 |
+| 链同步 | 新节点自动请求全链同步 |
 | 持久化 | serde_json 序列化 |
 
 ## 技术栈
@@ -62,7 +64,8 @@ axum 0.8 · tokio · libp2p 0.56 · ed25519-dalek 2.x · serde · sha2
 ## 测试
 
 ```bash
-cargo test              # 全部测试（30 单元 + 1 集成）
-cargo test --lib        # 单元测试
-cargo test --test p2p_test  # P2P 集成测试
+cargo test                    # 全部测试（29 单元 + 2 集成）
+cargo test --lib              # 单元测试
+cargo test --test api_test    # HTTP API 集成测试
+cargo test --test p2p_test    # P2P 网络集成测试
 ```

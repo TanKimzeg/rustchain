@@ -8,10 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # 构建
 cargo build
 
-# 运行全部测试
+# 运行全部测试（29 单元 + 2 集成）
 cargo test
 
-# 运行单个测试（按名称匹配）
+# 运行单个测试
 cargo test test_genesis
 cargo test test_mempool_full_flow
 
@@ -19,13 +19,17 @@ cargo test test_mempool_full_flow
 cargo test --lib block::tests
 cargo test --lib mempool::tests
 
-# 显示测试输出（println 可见）
+# 集成测试
+cargo test --test api_test     # HTTP API 集成测试
+cargo test --test p2p_test     # P2P 网络集成测试
+
+# 显示测试输出
 cargo test -- --nocapture
 
-# 检查编译错误（不运行测试）
+# 检查编译错误
 cargo check
 
-# 启动 HTTP 服务器
+# 启动（HTTP :3000 + P2P :3001）
 cargo run
 ```
 
@@ -87,10 +91,6 @@ lib.rs              — 模块注册，全局常量
 │   ├── build_p2p()   — 启动 P2P 节点（返回广播 Sender）
 │   ├── publish_message() — 广播消息到 gossip 网络
 │   └── 集成测试 tests/p2p_test.rs（1 个）
-    ├── submit_tx()    — POST /tx
-    ├── save_chain()   — POST /save
-    ├── load_chain()   — POST /load
-    └── 5 个测试
 ```
 
 ### 数据流
@@ -153,9 +153,11 @@ lib.rs              — 模块注册，全局常量
 |------------------|------------------------------------------------|
 | axum 0.8         | HTTP 框架（Router, State, extractors）          |
 | tokio            | 异步运行时                                      |
+| libp2p 0.56      | P2P 网络（gossipsub, mDNS, noise, yamux）       |
 | ed25519-dalek 2.x| 数字签名（VerifyingKey / SigningKey）           |
 | sha2             | SHA-256 哈希                                   |
 | serde / serde_json| 序列化                                        |
 | hex              | 字节 ↔ 十六进制字符串                          |
 | chrono           | 时间戳                                         |
 | rand             | 生成随机密钥对                                  |
+| reqwest (dev)    | HTTP 集成测试客户端                            |
