@@ -8,7 +8,7 @@ use chrono::Utc;
 
 use crate::{COINBASE_ADDR, INIT_ADJ_INTERVAL, INIT_TARGET_TIME, merkle, transaction::Transaction};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Block {
     pub index: u32,
     pub timestamp: u64,

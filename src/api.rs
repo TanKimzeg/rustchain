@@ -5,25 +5,15 @@ use axum::{
     extract::{Path, State},
 };
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 
-use crate::{block::Blockchain, mempool::Miner, transaction::Transaction};
+use crate::{block::Blockchain, mempool::Miner, p2p::P2PMessage, transaction::Transaction};
 
 #[derive(Clone)]
 pub struct AppState {
     pub blockchain: Arc<Mutex<Blockchain>>,
     pub test_miner: Miner,
-}
-
-impl AppState {
-    pub fn new() -> Self {
-        let chain = Arc::new(Mutex::new(
-            Blockchain::load("blockchain.json").unwrap_or(Blockchain::new(4)),
-        ));
-        Self {
-            blockchain: chain.clone(),
-            test_miner: Miner::start_new(chain.clone()),
-        }
-    }
+    pub p2p_tx: mpsc::UnboundedSender<P2PMessage>,
 }
 
 /// GET /chain — 返回整条链
@@ -46,10 +36,14 @@ pub async fn get_mempool(State(state): State<AppState>) -> Json<Value> {
     Json(serde_json::to_value(&txs).unwrap())
 }
 
-/// POST /tx — 提交交易到交易池
+/// POST /tx — 提交交易到交易池（含 P2P 广播）
 pub async fn submit_tx(State(state): State<AppState>, Json(tx): Json<Transaction>) -> Json<Value> {
+    let msg = P2PMessage::NewTransaction(tx.clone());
     match state.test_miner.submit_tx(tx) {
-        Ok(_) => Json(json!({"status": "ok"})),
+        Ok(_) => {
+            let _ = state.p2p_tx.send(msg);
+            Json(json!({"status": "ok"}))
+        }
         Err(e) => Json(json!({"status": "error", "message": e})),
     }
 }
@@ -91,9 +85,11 @@ mod tests {
     fn make_test_state() -> AppState {
         let chain = Arc::new(Mutex::new(Blockchain::new(2)));
         let miner = Miner::start_new(chain.clone());
+        let (p2p_tx, _rx) = mpsc::unbounded_channel();
         AppState {
             blockchain: chain,
             test_miner: miner,
+            p2p_tx,
         }
     }
 

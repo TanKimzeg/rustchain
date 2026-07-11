@@ -2,14 +2,18 @@ use crate::block::Block;
 use crate::mempool::Miner;
 use crate::transaction::Transaction;
 use ed25519_dalek::SigningKey;
+use futures::StreamExt;
 use libp2p::SwarmBuilder;
-use libp2p::gossipsub::{self, MessageId};
+use libp2p::gossipsub::{self, IdentTopic, MessageId};
 use libp2p::identity;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+pub const BLOCKCHAIN_TOPIC: &str = "rustchain";
 
 /// P2P 网络里交换的消息类型
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum P2PMessage {
     NewBlock(Block),
     NewTransaction(Transaction),
@@ -22,12 +26,13 @@ pub struct BlockchainBehaviour {
     pub mdns: libp2p::mdns::tokio::Behaviour,
 }
 
-pub fn build_p2p(signing_key: &SigningKey) -> libp2p::swarm::Swarm<BlockchainBehaviour> {
-    // 将 ed25519-dalek SigningKey 转为 libp2p Keypair
+/// 构建 swarm（主要用于测试）
+pub fn build_swarm(
+    signing_key: &SigningKey,
+) -> (libp2p::swarm::Swarm<BlockchainBehaviour>, IdentTopic) {
     let keypair = identity::Keypair::ed25519_from_bytes(signing_key.to_bytes()).unwrap();
     let peer_id = keypair.public().to_peer_id();
 
-    // 1. 配置 gossipsub（使用 Miner 的 identity）
     let message_id_fn = |message: &gossipsub::Message| MessageId::from(&message.data[..20]);
     let gossip_config = gossipsub::ConfigBuilder::default()
         .validation_mode(gossipsub::ValidationMode::Permissive)
@@ -35,20 +40,21 @@ pub fn build_p2p(signing_key: &SigningKey) -> libp2p::swarm::Swarm<BlockchainBeh
         .build()
         .unwrap();
 
-    let gossip = gossipsub::Behaviour::new(
+    let mut gossip = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(keypair.clone()),
         gossip_config,
     )
     .unwrap();
 
-    // 2. 配置 mDNS（使用 Miner 的 peer_id）
+    let topic = IdentTopic::new(BLOCKCHAIN_TOPIC);
+    gossip.subscribe(&topic).unwrap();
+
     let mdns =
         libp2p::mdns::tokio::Behaviour::new(libp2p::mdns::Config::default(), peer_id).unwrap();
 
     let behaviour = BlockchainBehaviour { gossip, mdns };
 
-    // 3. 用 SwarmBuilder 构建传输 + swarm
-    SwarmBuilder::with_existing_identity(keypair)
+    let swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(
             libp2p::tcp::Config::default(),
@@ -59,15 +65,31 @@ pub fn build_p2p(signing_key: &SigningKey) -> libp2p::swarm::Swarm<BlockchainBeh
         .with_behaviour(|_| behaviour)
         .unwrap()
         .with_swarm_config(|c| c)
-        .build()
+        .build();
+
+    (swarm, topic)
 }
 
-pub async fn handle_p2p_event(
+/// 广播消息到 gossip 网络
+pub fn publish_message(
+    swarm: &mut libp2p::swarm::Swarm<BlockchainBehaviour>,
+    topic: &IdentTopic,
+    msg: P2PMessage,
+) {
+    let data = serde_json::to_vec(&msg).unwrap();
+    let _ = swarm
+        .behaviour_mut()
+        .gossip
+        .publish(topic.clone(), data);
+    log::info!("📡 广播: {:?}", msg);
+}
+
+/// 处理 P2P 收到的消息
+async fn handle_p2p_event(
     event: libp2p::swarm::SwarmEvent<BlockchainBehaviourEvent>,
     miner: &Miner,
 ) {
     match event {
-        // gossipsub 收到消息
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Gossip(gossipsub::Event::Message {
             message,
             ..
@@ -75,25 +97,55 @@ pub async fn handle_p2p_event(
             if let Ok(msg) = serde_json::from_slice::<P2PMessage>(&message.data) {
                 match msg {
                     P2PMessage::NewBlock(block) => {
-                        println!("P2P 收到新区块 #{}", block.index);
+                        log::info!("📩 P2P 收到区块 #{}", block.index);
                         let mut chain = miner.chain.lock().unwrap();
                         chain.add_block(block).ok();
                     }
                     P2PMessage::NewTransaction(tx) => {
-                        println!("P2P 收到新交易");
+                        log::info!("📩 P2P 收到交易");
                         miner.submit_tx(tx).ok();
                     }
                 }
             }
         }
-        // mDNS 发现新节点
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Mdns(libp2p::mdns::Event::Discovered(
             list,
         ))) => {
             for (peer_id, addr) in list {
-                println!("发现新节点: {} @ {}", peer_id, addr);
+                log::info!("发现新节点: {} @ {}", peer_id, addr);
             }
         }
         _ => {}
     }
+}
+
+/// 启动 P2P 节点，返回发送端用于广播消息
+pub fn build_p2p(
+    signing_key: &SigningKey,
+    miner: Miner,
+    listen_port: u16,
+) -> mpsc::UnboundedSender<P2PMessage> {
+    let (mut swarm, topic) = build_swarm(signing_key);
+
+    let listen_addr: libp2p::Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", listen_port)
+        .parse()
+        .unwrap();
+    swarm.listen_on(listen_addr).unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                event = swarm.select_next_some() => {
+                    handle_p2p_event(event, &miner).await;
+                }
+                Some(msg) = rx.recv() => {
+                    publish_message(&mut swarm, &topic, msg);
+                }
+            }
+        }
+    });
+
+    tx
 }
