@@ -3,6 +3,7 @@ pub mod transaction;
 pub mod mempool;
 pub mod merkle;
 pub mod api;
+pub mod p2p;
 
 pub const COINBASE_ADDR: &str = "COINBASE";
 pub const REWARD: u64 = 50;

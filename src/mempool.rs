@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::transaction::generate_wallet;
+use ed25519_dalek::SigningKey;
 use crate::{
     COINBASE_ADDR,
     block::{Block, Blockchain},
@@ -114,8 +115,9 @@ mod tests {
 
         let pool = Arc::new(Mutex::new(MemeryPool::new()));
         let chain_arc = Arc::new(Mutex::new(chain));
+        let key_pair = generate_wallet();
         let miner = Miner {
-            address: "test_miner".to_string(),
+            key_pair,
             pool: pool.clone(),
             chain: chain_arc.clone(),
         };
@@ -125,7 +127,7 @@ mod tests {
         assert_eq!(block.index, 2);
         assert!(!block.transactions.is_empty());
         assert_eq!(block.transactions[0].sender, COINBASE_ADDR);
-        assert_eq!(block.transactions[0].receiver, "test_miner");
+        assert_eq!(block.transactions[0].receiver, miner.address());
         assert_eq!(block.transactions[0].amount, REWARD);
         assert!(block.hash.starts_with("00"));
     }
@@ -145,7 +147,7 @@ mod tests {
         pool.lock().unwrap().push(tx.clone());
 
         let miner = Miner {
-            address: "miner".to_string(),
+            key_pair: generate_wallet(),
             pool: pool.clone(),
             chain: chain_arc.clone(),
         };
@@ -182,7 +184,7 @@ mod tests {
     fn test_miner_start_new_creates_miner_with_pool() {
         let chain = Arc::new(Mutex::new(Blockchain::new(2)));
         let miner = Miner::start_new(chain.clone());
-        assert!(!miner.address.is_empty());
+        assert!(!miner.address().is_empty());
         // 验证矿工有自己的交易池
         let pool = miner.pool.lock().unwrap();
         assert!(pool.candidate.is_empty());
@@ -191,7 +193,7 @@ mod tests {
 
 #[derive(Clone)]
 pub struct Miner {
-    pub address: String,
+    pub key_pair: SigningKey,
     pub pool: Arc<Mutex<MemeryPool>>,
     pub chain: Arc<Mutex<Blockchain>>,
 }
@@ -202,7 +204,7 @@ impl Miner {
         let txs = self.pool.lock().unwrap().select(10);
 
         let fees = txs.iter().map(|t| t.fee).sum::<u64>();
-        let coinbase = Transaction::new_coinbase(&self.address, fees);
+        let coinbase = Transaction::new_coinbase(&self.address(), fees);
 
         let mut all_txs = vec![coinbase];
         all_txs.extend(txs);
@@ -236,7 +238,7 @@ impl Miner {
 
     pub fn start_new(chain: Arc<Mutex<Blockchain>>) -> Self {
         let miner = Self {
-            address: hex::encode(generate_wallet().verifying_key().to_bytes()),
+            key_pair: generate_wallet(),
             pool: Arc::new(Mutex::new(MemeryPool::new())),
             chain,
         };
@@ -288,5 +290,9 @@ impl Miner {
         }
         self.pool.lock().unwrap().push(tx);
         Ok(())
+    }
+
+    pub fn address(&self) -> String {
+        hex::encode(self.key_pair.verifying_key().to_bytes())
     }
 }
