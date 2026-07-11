@@ -62,21 +62,31 @@ lib.rs              — 模块注册，全局常量
 │
 ├── mempool.rs      — 交易池 + 矿工
 │   ├── MemeryPool     — HashSet<Transaction>
-│   ├── submit()       — 验签后入池
 │   ├── select()       — 按 fee 降序取 N 笔
 │   ├── remove()       — 删除已上链交易
-│   ├── Miner          — 独立矿工（address, pool, chain, tx_count）
+│   ├── Miner          — 独立矿工（SigningKey, pool, chain）
 │   │   ├── assemble_block() — 选tx → coinbase → 过滤 → 挖矿 → 返回 Block
 │   │   ├── filter_valid_txs() — 余额 + nonce 逐笔模拟
+│   │   ├── submit_tx() — 验签后入池
 │   │   ├── start_mining_loop() — 后台 5 秒循环挖矿
 │   │   └── start_new() — 一键创建矿工并启动循环
-│   └── 9 个测试（5 MemeryPool + 4 Miner）
+│   └── 8 个测试（4 MemeryPool + 4 Miner）
 │
-└── api.rs          — HTTP 处理器
-    ├── AppState       — Arc<Mutex<Blockchain>> + Miner
-    ├── get_chain()    — GET /chain
-    ├── get_balance()  — GET /balance/{address}
-    ├── get_mempool()  — GET /mempool
+├── api.rs          — HTTP 处理器
+│   ├── AppState       — Arc<Mutex<Blockchain>> + Miner + P2P Sender
+│   ├── get_chain()    — GET /chain
+│   ├── get_detail()   — GET /detail/{address}
+│   ├── get_mempool()  — GET /mempool
+│   ├── submit_tx()    — POST /tx（含 P2P 广播）
+│   ├── save_chain()   — POST /save
+│   ├── load_chain()   — POST /load
+│   └── 5 个测试
+│
+├── p2p.rs           — P2P 网络（libp2p）
+│   ├── build_swarm() — 创建测试用 swarm（返回 Swarm + Topic）
+│   ├── build_p2p()   — 启动 P2P 节点（返回广播 Sender）
+│   ├── publish_message() — 广播消息到 gossip 网络
+│   └── 集成测试 tests/p2p_test.rs（1 个）
     ├── submit_tx()    — POST /tx
     ├── save_chain()   — POST /save
     ├── load_chain()   — POST /load
@@ -86,19 +96,24 @@ lib.rs              — 模块注册，全局常量
 ### 数据流
 
 ```
-用户生成签名交易 → POST /tx → MemeryPool.submit()
-                                   │
-                Miner 后台循环（5s） │
-                                   ▼
-              Miner.assemble_block():
-                 pool.select(10) → 创建 coinbase
-                 → filter_valid_txs(余额 + nonce)
-                 → Block::new (Merkle root) → mine_block (PoW)
-                 → pool.remove(已上链及无效交易)
-                                   │
-                                   ▼
-              Blockchain.add_block(block):
-                 check_block → push → adjust_difficulty
+用户 → POST /tx → Miner.submit_tx() → MemeryPool
+         │                              │
+         ├─ P2P 广播 ─→ 其他节点收到     │
+         │                    │          │
+         │                    ▼          │
+         │              Miner.submit_tx()│
+         │                    │          │
+         ▼                    ▼          ▼
+            Miner 后台循环（5s）
+                 │
+           pool.select(10) → 创建 coinbase
+           → filter_valid_txs(余额 + nonce)
+           → Block::new → mine_block (PoW)
+           → pool.remove(已上链交易)
+                 │
+                 ▼
+           Blockchain.add_block(block):
+             check_block → update_metadata_delta → push → adjust_difficulty
 ```
 
 ### 全局常量
@@ -126,7 +141,11 @@ lib.rs              — 模块注册，全局常量
 
 7. **手续费归矿工** — Miner 汇总区块内所有交易的 fee 加到 coinbase 金额中。
 
-8. **测试模块化** — 每个测试只测一个场景，函数名就是场景描述。每个模块有自己的 `#[cfg(test)] mod tests`。
+8. **P2P 用 gossipsub + mDNS** — libp2p 处理加密传输和节点发现，应用层只关心 NewBlock / NewTransaction 两种消息。
+
+9. **Miner 身份 = P2P 身份** — Miner 的 `SigningKey` 同时用于链上地址和 libp2p 的 PeerId，`identity::Keypair::ed25519_from_bytes()` 直接转换。
+
+10. **测试模块化** — 每个测试只测一个场景，函数名就是场景描述。每个模块有自己的 `#[cfg(test)] mod tests`，集成测试在 `tests/` 目录。
 
 ### 依赖
 

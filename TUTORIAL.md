@@ -24,6 +24,7 @@
 16. [Nonce——防重放攻击](#16-nonce防重放攻击)
 17. [Miner 解耦——矿工独立循环](#17-miner-解耦矿工独立循环)
 18. [HTTP API——与链交互](#18-http-api与链交互)
+19. [P2P 网络——节点发现与消息广播](#19-p2p-网络节点发现与消息广播)
 
 ---
 
@@ -878,6 +879,8 @@ fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, /* ... */) {
     │                                        │
     ├── Miner 解耦 ─→ HTTP API                │
     │                                        │
+    ├── P2P 网络 ─→ gossipsub 广播             │
+    │                                        │
     └── 模块化测试 ←───────────────────────────┘
 ```
 
@@ -900,12 +903,12 @@ fn chain_with_three_blocks() -> (Blockchain, SigningKey, String, /* ... */) {
 | 关注点分离   | `Blockchain` / `Miner` 解耦           |
 | RPC 接口     | axum HTTP API                        |
 | 状态缓存     | `AddressDetail` + `update_metadata_delta` |
+| P2P 网络     | libp2p gossipsub + mDNS                   |
 
 **这些就是主流公链核心机制的 80%——无论 Bitcoin 的 UTXO 还是 Ethereum 的账户模型，底层都是这些构件。**
 
 ### 接下来可以做什么
 
-- **P2P 网络** — 多节点同步、分叉处理、共识协议
 - **UTXO 模型** — 改用 inputs/outputs 替代 account 模型。Bitcoin 用 UTXO，Ethereum 用账户——两种设计各有优劣，值得都试一遍
 - **智能合约** — 在交易里嵌入可执行脚本
 - **钱包生成** — 助记词、BIP32 分层确定性钱包
@@ -1351,6 +1354,7 @@ async fn test_submit_tx_and_query_mempool() {
 | `mempool.rs`     | 9      | 池操作(5) + Miner 组装区块(3) + start_new(1)              |
 | `block.rs`       | 8      | 创世块、余额、链有效、篡改/断裂/PoW 检测、全流程、持久化 |
 | `api.rs`         | 5      | 链查询、余额、无效签名拒绝、提交流程                     |
+| `p2p.rs`         | —      | 集成测试在 `tests/`                                      |
 | **总计**         | **30** |                                                           |
 
 ### 学到了什么
@@ -1359,6 +1363,160 @@ async fn test_submit_tx_and_query_mempool() {
 - **`Miner` 自带交易池**——API 不再需要单独管理 pool，所有操作通过 Miner
 - **后台矿工自动循环**——启动服务器后矿工就自动挖矿，不需要手动触发
 - **测试直接调用函数**——比启动 HTTP 服务器测试更快、更可控
+
+---
+
+## 19. P2P 网络——节点发现与消息广播
+
+### 问题：单机不是网络
+
+现在的区块链在单机上完整可运行——挖矿、交易、API 都有。但区块链的本质是**网络**，多节点各自运行并同步数据才是它存在的意义。
+
+要实现两个节点互通，需要解决三个问题：
+
+1. **节点发现** — A 怎么知道 B 的存在？
+2. **消息广播** — A 挖到块/收到交易，怎么通知其他节点？
+3. **链同步** — 新节点加入时，怎么拿到完整的历史？
+
+### 为什么不自己写 TCP
+
+手写 P2P 协议是个无底洞——NAT 穿透、连接管理、加密传输、协议协商……这些与区块链逻辑无关但又必须做的事。
+
+**libp2p** 是去中心化网络的标准协议栈，IPFS、Polkadot、Filecoin 都在用。它帮你处理了网络层的脏活，你只需要定义"收到什么消息做什么事"。
+
+```toml
+libp2p = { version = "0.56", features = ["gossipsub", "mdns", "tokio", "noise", "yamux"] }
+```
+
+### 架构
+
+```rust
+// 三个关键组件组合成一个"行为"
+#[derive(NetworkBehaviour)]
+pub struct BlockchainBehaviour {
+    pub gossip: gossipsub::Behaviour,  // 消息广播协议
+    pub mdns: libp2p::mdns::tokio::Behaviour,  // 局域网节点发现
+}
+```
+
+- **gossipsub**：每个节点把消息转发给一部分邻居，最终所有节点收到。比洪泛高效，是区块链广播的标准方案。
+- **mDNS**：局域网内自动发现节点，零配置就能连上。
+
+### 消息类型
+
+节点之间只交换两种消息：
+
+```rust
+pub enum P2PMessage {
+    NewBlock(Block),
+    NewTransaction(Transaction),
+}
+```
+
+收到新区块 → 验签后追加到本地链
+收到新交易 → 验签后入交易池
+
+### 启动 P2P 节点
+
+```rust
+pub fn build_p2p(
+    signing_key: &SigningKey,
+    miner: Miner,
+    listen_port: u16,
+) -> mpsc::UnboundedSender<P2PMessage> {
+    let (mut swarm, topic) = build_swarm(signing_key);
+    swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{listen_port}").parse().unwrap()).unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                event = swarm.select_next_some() => {
+                    handle_p2p_event(event, &miner).await;
+                }
+                Some(msg) = rx.recv() => {
+                    publish_message(&mut swarm, &topic, msg);
+                }
+            }
+        }
+    });
+    tx  // 返回发送端，API 层用它广播
+}
+```
+
+关键设计：`build_p2p` 返回一个 `UnboundedSender`，API 层持有它，提交交易后通过它广播：
+
+```rust
+// api.rs
+pub async fn submit_tx(State(state): State<AppState>, Json(tx): Json<Transaction>) -> Json<Value> {
+    let msg = P2PMessage::NewTransaction(tx.clone());
+    state.test_miner.submit_tx(tx).ok();
+    state.p2p_tx.send(msg).ok();  // 广播到 P2P 网络
+    Json(json!({"status": "ok"}))
+}
+```
+
+### 与 Miner 身份统一
+
+Miner 原本用 `generate_wallet()` 生成 `SigningKey`，P2P 也需要一个身份密钥对。两者统一：
+
+```rust
+// Miner 直接持有 SigningKey，既是钱包也是 P2P 身份
+pub struct Miner {
+    pub key_pair: SigningKey,
+    pub pool: Arc<Mutex<MemeryPool>>,
+    pub chain: Arc<Mutex<Blockchain>>,
+}
+
+// 启动时转为 libp2p 的 Keypair
+let keypair = identity::Keypair::ed25519_from_bytes(signing_key.to_bytes()).unwrap();
+```
+
+这样节点的链上地址和 P2P 的 PeerId 来自同一把密钥，逻辑统一。
+
+### 集成测试
+
+测试两个节点能否建立连接并交换消息：
+
+```rust
+#[tokio::test]
+async fn test_gossip_message_exchange() {
+    let (mut s1, t1) = build_swarm(&test_key());
+    let (mut s2, _t2) = build_swarm(&test_key());
+
+    // 监听随机端口，s2 拨号到 s1
+    s2.dial(addr1).unwrap();
+
+    // 等待双方连接建立
+    // 发布消息 → s2 接收并验证
+    publish_message(&mut s1, &t1, msg);
+    // s2 收到消息，assert_eq!
+}
+```
+
+测试要点：
+- **两个 swarm 必须在同一个 tokio 运行时中同时 poll**，否则连接无法建立
+- 连接建立后需要短暂等待 gossipsub 交换订阅信息，再发布消息
+- 使用 `tokio::select!` 同时 poll 两个 swarm 的事件
+
+### 当前测试覆盖
+
+| 模块             | 测试数 | 覆盖内容                                                    |
+| ---------------- | ------ | ----------------------------------------------------------- |
+| `transaction.rs` | 4      | 验签、coinbase、篡改拒绝、签名排除                          |
+| `merkle.rs`      | 4      | 空列表、长度、确定性、单双不同                              |
+| `mempool.rs`     | 9      | 池操作(5) + Miner 组装区块(3) + start_new(1)                |
+| `block.rs`       | 8      | 创世块、余额、链有效、篡改/断裂/PoW 检测、全流程、持久化   |
+| `api.rs`         | 5      | 链查询、余额、无效签名拒绝、提交和查池流程                  |
+| `p2p.rs`         | —      | 集成测试在 `tests/p2p_test.rs`（1 个）                      |
+| **总计**         | **31** |                                                             |
+
+### 学到了什么
+
+- **P2P 能用库就别自己搓协议**——libp2p 处理了加密、握手、重连，你只需要关心消息内容
+- **gossipsub 比洪泛高效**——每个消息只转发给部分节点，指数级扩散，而非线性爆炸
+- **异步事件循环管理一切**——`tokio::select!` 同时监听网络事件和本地广播请求，一个循环处理所有 I/O
+- **Sender/Receiver 解耦**——API 层只需持有一个 `Sender`，不需要知道 P2P 的内部状态
 
 ---
 
